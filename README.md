@@ -1,6 +1,6 @@
 # Roll Pitch and Yaw visualization using MPU6050 and Processing
 
-![System Diagram](images/ProcessingVisualization.png)
+![System Diagram](Images/ProcessingVisualization.png)
 
 Requirements:
 1. Processing
@@ -8,4 +8,4 @@ Requirements:
 3. ESP32
 4. Breadboard
 
-![System Diagram](images/HardwareSetup.jpeg)
+![System Diagram](Images/HardwareSetup.jpeg)

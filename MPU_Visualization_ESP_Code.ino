@@ -15,7 +15,7 @@ unsigned long lastSend = 0;
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(6, 7);
+  Wire.begin(5,4);
   mpu.initialize();
 
   if (mpu.testConnection()) {

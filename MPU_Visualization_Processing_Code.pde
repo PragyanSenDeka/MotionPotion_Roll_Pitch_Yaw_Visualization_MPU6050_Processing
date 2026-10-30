@@ -13,8 +13,19 @@
 */
 import processing.serial.*;
 
+// ════════════════════════════════════════════════
+//  >>> STUDENTS: CHANGE THIS TO YOUR COM PORT <<<
+//  Put the same COM port you used when you uploaded the ESP32 code
+//  (Arduino IDE > Tools > Port), e.g. "COM3" or "COM7".
+//  On Mac/Linux it looks like "/dev/cu.usbserial-XXXX" or "/dev/ttyUSB0".
+//  Close the Arduino Serial Monitor first — only one program can use the port.
+// ════════════════════════════════════════════════
+String COM_PORT = "COM5";
+
 Serial port;
-boolean demoMode = false;   // true when no serial port opens: the model sways on its own
+boolean demoMode = true;    // true whenever no ESP data is arriving: the model sways on its own
+int lastDataTime = -100000; // millis() when the last valid line arrived from the ESP
+int DATA_TIMEOUT = 1500;    // ms without data before falling back to demo mode
 
 float pitch = 0, roll = 0, yaw = 0;
 float smoothPitch = 0, smoothRoll = 0, smoothYaw = 0;
@@ -82,19 +93,13 @@ void setup() {
     dropX[i] = random(-84, -26); dropZ[i] = random(-16, 16); dropOff[i] = random(1);
   }
 
-  // Serial: change the [0] if your ESP32 is on a different port
-  String[] ports = Serial.list();
-  printArray(ports);
-  if (ports.length > 0) {
-    try {
-      port = new Serial(this, ports[0], 115200);
-      port.bufferUntil('\n');
-    } catch (Exception e) {
-      println("Could not open " + ports[0] + " -> demo mode");
-      demoMode = true;
-    }
-  } else {
-    println("No serial port found -> demo mode");
+  // Serial: opens the port set in COM_PORT at the top of this sketch
+  printArray(Serial.list());   // lists available ports in the console, handy if yours won't open
+  try {
+    port = new Serial(this, COM_PORT, 115200);
+    port.bufferUntil('\n');
+  } catch (Exception e) {
+    println("Could not open " + COM_PORT + " -> demo mode. Check COM_PORT at the top of the sketch.");
     demoMode = true;
   }
 }
@@ -119,6 +124,9 @@ void draw() {
   t = millis() / 1000.0;
   background(12, 12, 28);
   drawStars();
+
+  // Demo plays until real ESP data arrives, and comes back if the data stops
+  demoMode = port == null || millis() - lastDataTime > DATA_TIMEOUT;
 
   if (demoMode) {
     pitch = 28 * sin(t * 0.7);
@@ -196,6 +204,7 @@ float easeOutBack(float x) {
 // Call this with MPU flat on the table.
 // Captures current raw pitch/roll/yaw as the "zero" reference.
 void calibrate() {
+  if (demoMode) return;   // don't calibrate against the fake demo motion
   offsetPitch = pitch;
   offsetRoll  = roll;
   offsetYaw   = yaw;
@@ -1198,7 +1207,8 @@ void drawHUD() {
   textSize(11);
   if (demoMode) {
     fill(255, 75, 75);
-    text("● DEMO MODE: serial port not connected", 26, 52);
+    text(port == null ? "● DEMO: can't open " + COM_PORT
+                      : "● DEMO: no ESP data on " + COM_PORT, 26, 52);
   } else {
     fill(calibrated ? color(80, 200, 100) : color(255, 160, 60));
     text(calibrated ? "● Calibrated" : "● Place flat and press C", 26, 52);
@@ -1253,8 +1263,14 @@ void drawFunLine(float x, float y) {
 void drawDemoBanner() {
   if (!demoMode) return;
 
-  String title  = "DEMO MODE - SERIAL PORT NOT CONNECTED";
-  String detail = "The model is moving by itself. This is NOT live MPU6050 data.";
+  String title, detail;
+  if (port == null) {
+    title  = "DEMO MODE - CAN'T OPEN " + COM_PORT;
+    detail = "Check COM_PORT at the top of the sketch. This is NOT live MPU6050 data.";
+  } else {
+    title  = "DEMO MODE - NO ESP DATA ON " + COM_PORT;
+    detail = "ESP32 data not received. The model is moving by itself, NOT live MPU6050 data.";
+  }
 
   float left = 270;                          // keep clear of the HUD panel
   float cx = (left + width) / 2;
@@ -1349,9 +1365,16 @@ void serialEvent(Serial p) {
     String[] vals = split(data, ',');
     if (vals.length >= 3) {
       try {
-        pitch = float(vals[0]);
-        roll  = float(vals[1]);
-        yaw   = float(vals[2]);
+        float p0 = float(trim(vals[0]));
+        float r0 = float(trim(vals[1]));
+        float y0 = float(trim(vals[2]));
+        // only count it as real data if all three are numbers
+        if (!Float.isNaN(p0) && !Float.isNaN(r0) && !Float.isNaN(y0)) {
+          pitch = p0;
+          roll  = r0;
+          yaw   = y0;
+          lastDataTime = millis();
+        }
       } catch (Exception e) {
         println("Parse error: " + e.getMessage());
       }

@@ -176,6 +176,7 @@ void draw() {
   drawHUD();
   drawButtons();
   drawToast();
+  drawDemoBanner();
   hint(ENABLE_DEPTH_TEST);
 }
 
@@ -216,9 +217,7 @@ boolean over(float x, float y, float w, float h) {
 
 void mousePressed() {
   if (over(btnX, calBtnY, btnW, btnH)) calibrate();
-  else if (over(btnX, funBtnY, btnW, btnH)) setModel(currentModel + 1);
 }
-
 void keyPressed() {
   if (key == 'c' || key == 'C') calibrate();
   if (key == 'f' || key == 'F') setModel(currentModel + 1);
@@ -1154,36 +1153,17 @@ void drawGun() {
 }
 
 // ── Buttons ────────────────────────────────────
+// ── Buttons ────────────────────────────────────
 void drawButtons() {
   calBtnY = height - 60;
-  funBtnY = height - 108;
   textFont(hudFont);
-
-  // Fun button
-  boolean fh = over(btnX, funBtnY, btnW, btnH);
-  fill(fh ? color(170, 70, 200) : color(110, 45, 140));
-  noStroke();
-  rect(btnX, funBtnY, btnW, btnH, 7);
-  // little star icon
-  fill(255, 220, 90);
-  float sx = btnX + 20, sy = funBtnY + btnH / 2;
-  beginShape();
-  for (int i = 0; i < 10; i++) {
-    float a = -HALF_PI + i * PI / 5;
-    float r = i % 2 == 0 ? 8 : 3.5;
-    vertex(sx + r * cos(a), sy + r * sin(a));
-  }
-  endShape(CLOSE);
-  fill(240, 225, 255);
-  textSize(13);
-  textAlign(LEFT, CENTER);
-  text("Next object  [F]", btnX + 38, funBtnY + btnH / 2);
 
   // Calibrate button
   boolean ch = over(btnX, calBtnY, btnW, btnH);
   if (calibrated && !ch) fill(20, 80, 40);   // green tint after first calibration
   else if (ch) fill(50, 100, 200);
   else fill(30, 60, 130);
+  noStroke();
   rect(btnX, calBtnY, btnW, btnH, 7);
 
   // Small crosshair icon
@@ -1197,6 +1177,8 @@ void drawButtons() {
   noStroke();
 
   fill(200, 220, 255);
+  textSize(13);
+  textAlign(LEFT, CENTER);
   text(calibrated ? "Re-calibrate Horizon  [C]" : "Calibrate Horizon  [C]", btnX + 38, calBtnY + btnH / 2);
 }
 
@@ -1215,8 +1197,8 @@ void drawHUD() {
   // Calibration status
   textSize(11);
   if (demoMode) {
-    fill(255, 120, 200);
-    text("● DEMO MODE (no serial port)", 26, 52);
+    fill(255, 75, 75);
+    text("● DEMO MODE: serial port not connected", 26, 52);
   } else {
     fill(calibrated ? color(80, 200, 100) : color(255, 160, 60));
     text(calibrated ? "● Calibrated" : "● Place flat and press C", 26, 52);
@@ -1238,7 +1220,7 @@ void drawHUD() {
   fill(200, 200, 220);
   text("OBJECT", 26, 156);
   fill(255);
-  text(modelNames[currentModel] + "   (" + (currentModel + 1) + "/" + modelNames.length + ", keys 1-5)", 80, 156);
+  text(modelNames[currentModel], 80, 156);
 
   drawFunLine(26, 192);
 }
@@ -1264,6 +1246,57 @@ void drawFunLine(float x, float y) {
     cx += textWidth(c);
   }
   colorMode(RGB, 255);
+}
+
+// ── Demo mode banner ───────────────────────────
+// Big red warning at the top so nobody mistakes the animation for the real sensor
+void drawDemoBanner() {
+  if (!demoMode) return;
+
+  String title  = "DEMO MODE - SERIAL PORT NOT CONNECTED";
+  String detail = "The model is moving by itself. This is NOT live MPU6050 data.";
+
+  float left = 270;                          // keep clear of the HUD panel
+  float cx = (left + width) / 2;
+  float pulse = 0.5 + 0.5 * sin(t * 6);
+
+  textFont(labelFont);
+  textSize(20);
+  float tw = textWidth(title);
+  textFont(hudFont);
+  textSize(14);
+  float dw = textWidth(detail);
+  float w = min(max(tw + 56, dw + 32), width - left - 16);
+  float h = 66;
+  float x = cx - w / 2, y = 14;
+
+  // background + pulsing red border
+  noStroke();
+  fill(40, 0, 0, 200);
+  rect(x, y, w, h, 10);
+  stroke(255, 70, 70, 110 + 145 * pulse);
+  strokeWeight(3);
+  noFill();
+  rect(x, y, w, h, 10);
+  noStroke();
+
+  // blinking warning dot
+  fill(255, 70, 70, 70 * pulse);
+  ellipse(x + 22, y + 22, 22, 22);
+  fill(255, 70, 70);
+  ellipse(x + 22, y + 22, 11, 11);
+
+  textFont(labelFont);
+  textSize(20);
+  textAlign(LEFT, CENTER);
+  fill(255, 90, 90);
+  text(title, x + 40, y + 21);
+
+  textFont(hudFont);
+  textSize(14);
+  textAlign(CENTER, CENTER);
+  fill(240, 225, 225);
+  text(detail, cx, y + 48);
 }
 
 void drawBar(float x, float y, float val, int c) {

@@ -5,6 +5,7 @@
     C        calibrate (hold the MPU flat first)
     F        next object
     1 - 5    pick an object: Jet, Sad Man, Frog, Knife, Gun
+    G        play "Sad Man vs the Space Frogs" (G again to come back)
 
   Every object is built from code — no model files needed.
   Optional: drop a goofy .ttf (e.g. Bangers-Regular.ttf from Google Fonts)
@@ -22,10 +23,14 @@ import processing.serial.*;
 // ════════════════════════════════════════════════
 String COM_PORT = "COM5";
 
+// Game settings (press G). Only change these if steering feels wrong.
+boolean GAME_USE_ROLL   = true;    // true = steer with ROLL, false = steer with PITCH
+boolean GAME_INVERT     = false;   // true if Sad Man moves the opposite way to your tilt
+float   GAME_TILT_RANGE = 30;      // degrees of tilt needed to reach the edge of the screen
+
 Serial port;
-boolean demoMode = true;    // true whenever no ESP data is arriving: the model sways on its own
-int lastDataTime = -100000; // millis() when the last valid line arrived from the ESP
-int DATA_TIMEOUT = 1500;    // ms without data before falling back to demo mode
+boolean demoMode = true;    // true until the first ESP data arrives: the model sways on its own
+int lastDataTime = -1;      // millis() when the last valid line arrived from the ESP (-1 = never)
 
 float pitch = 0, roll = 0, yaw = 0;
 float smoothPitch = 0, smoothRoll = 0, smoothYaw = 0;
@@ -122,13 +127,12 @@ PFont loadFunFont(int sz) {
 
 void draw() {
   t = millis() / 1000.0;
-  background(12, 12, 28);
-  drawStars();
 
-  // Demo plays until real ESP data arrives, and comes back if the data stops
-  demoMode = port == null || millis() - lastDataTime > DATA_TIMEOUT;
+  // Demo plays until the first real ESP data arrives. After that it stays live:
+  // the ESP only sends when the angle changes, so a sensor lying still is silent.
+  demoMode = port == null || lastDataTime < 0;
 
-  if (demoMode) {
+  if (demoMode && !gameMode) {
     pitch = 28 * sin(t * 0.7);
     roll  = 22 * sin(t * 0.5 + 1);
     yaw   = 18 * sin(t * 0.3);
@@ -144,6 +148,11 @@ void draw() {
   smoothPitch = wrap180(smoothPitch + wrap180(adjPitch - smoothPitch) * lerpSpeed);
   smoothRoll  = wrap180(smoothRoll  + wrap180(adjRoll  - smoothRoll)  * lerpSpeed);
   smoothYaw   = wrap180(smoothYaw   + wrap180(adjYaw   - smoothYaw)   * lerpSpeed);
+
+  if (gameMode) { drawGame(); return; }   // "Don't Press G" (game code is at the bottom)
+
+  background(12, 12, 28);
+  drawStars();
 
   // ── 3D scene ──
   pushMatrix();
@@ -225,12 +234,23 @@ boolean over(float x, float y, float w, float h) {
 }
 
 void mousePressed() {
+  if (gameMode) return;
   if (over(btnX, calBtnY, btnW, btnH)) calibrate();
+  if (over(26, 192 - 24, funFW, 30)) setModel(currentModel + 1);   // "Don't Press F !"
+  if (over(26, 218 - 24, funGW, 30)) enterGame();                  // "Don't Press G !"
 }
 void keyPressed() {
+  if (key == 'g' || key == 'G') {
+    if (gameMode) exitGame(); else enterGame();
+    return;
+  }
+  if (gameMode) { gameKeyPressed(); return; }
   if (key == 'c' || key == 'C') calibrate();
   if (key == 'f' || key == 'F') setModel(currentModel + 1);
   if (key >= '1' && key <= '5') setModel(key - '1');
+}
+void keyReleased() {
+  if (gameMode) gameKeyReleased();
 }
 
 // ── Scene helpers ──────────────────────────────
@@ -1195,7 +1215,7 @@ void drawButtons() {
 void drawHUD() {
   fill(0, 0, 0, 150);
   noStroke();
-  rect(14, 14, 240, 196, 8);
+  rect(14, 14, 240, 222, 8);
 
   textFont(hudFont);
   fill(180, 210, 255);
@@ -1232,12 +1252,14 @@ void drawHUD() {
   fill(255);
   text(modelNames[currentModel], 80, 156);
 
-  drawFunLine(26, 192);
+  funFW = drawFunLine("Don't Press F !", 26, 192, 0);
+  funGW = drawFunLine("Don't Press G !", 26, 218, 160);
 }
 
-// "Press F for fun!" — every letter bounces in its own rainbow colour
-void drawFunLine(float x, float y) {
-  String s = "Don't Press F !";
+// "Don't Press F / G" — every letter bounces in its own rainbow colour.
+// Returns the width so the line can be clicked like a button.
+float funFW = 0, funGW = 0;
+float drawFunLine(String s, float x, float y, float hueOff) {
   textFont(funFont);
   textSize(21);
   textAlign(LEFT, BASELINE);
@@ -1247,7 +1269,7 @@ void drawFunLine(float x, float y) {
     char c = s.charAt(i);
     float dy = sin(t * 5 + i * 0.55) * 2.4;
     float rot = sin(t * 4 + i * 1.7) * 0.09;
-    fill((t * 90 + i * 22) % 360, 65, 100);
+    fill((t * 90 + i * 22 + hueOff) % 360, 65, 100);
     pushMatrix();
     translate(cx, y + dy);
     rotate(rot);
@@ -1256,6 +1278,7 @@ void drawFunLine(float x, float y) {
     cx += textWidth(c);
   }
   colorMode(RGB, 255);
+  return cx - x;
 }
 
 // ── Demo mode banner ───────────────────────────
@@ -1269,7 +1292,7 @@ void drawDemoBanner() {
     detail = "Check COM_PORT at the top of the sketch. This is NOT live MPU6050 data.";
   } else {
     title  = "DEMO MODE - NO ESP DATA ON " + COM_PORT;
-    detail = "ESP32 data not received. The model is moving by itself, NOT live MPU6050 data.";
+    detail = "Waiting for ESP32 data - tilt the sensor once. Until then this is NOT live MPU6050 data.";
   }
 
   float left = 270;                          // keep clear of the HUD panel
@@ -1380,4 +1403,1706 @@ void serialEvent(Serial p) {
       }
     }
   }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  DON'T PRESS G  ->  SAD MAN vs THE SPACE FROGS
+//  A retro vertical shooter. Tilt the sensor (roll) to steer Sad Man.
+//  He cries automatically: his tears are the bullets.
+//
+//  In the game:  SPACE  start / play again        P  pause
+//                C      recenter the tilt (hold the sensor flat first)
+//                G/Esc  back to the visualizer
+//                Arrow keys or A / D move him when there is no sensor data
+// ════════════════════════════════════════════════════════════════════
+
+boolean gameMode = false;
+
+final int GW = 300, GH = 216;          // game screen size in chunky retro pixels
+final int PF_L = 60, PF_R = 240;       // playfield edges (score panels on either side)
+final float PF_C = 150;                // playfield centre
+int PX = 3;                            // real screen pixels per retro pixel
+int artPX = -1;                        // the PX the sprites were last built for
+int gox, goy;                          // where the game starts on screen
+
+final int G_TITLE = 0, G_PLAY = 1, G_OVER = 2;
+int gState = G_TITLE;
+boolean gPaused = false;
+int gLastMillis = 0;
+float gTime = 0, overT = 0, shake = 0, bannerT = 0;
+String bannerText = "";
+
+// Sad Man
+final float P_Y = 190;
+float pX = PF_C;
+int lives = 3;
+float invuln = 0, fireT = 0, stormT = 0, shieldT = 0, stormMax = 1, shieldMax = 1;
+boolean eyeToggle = false, keyL = false, keyR = false;
+int lvFire = 1, lvSpread = 1, lvDamage = 1, overcharge = 0;
+final int MAX_FIRE = 8, MAX_SPREAD = 5, MAX_DAMAGE = 6;
+final int[]   SPREAD_N   = { 1, 2, 3, 5, 7, 9, 11 };
+final float[] SPREAD_DEG = { 0, 6, 24, 48, 90, 120, 150 };
+final float[] DAMAGE_LV  = { 1, 1.4, 1.9, 2.5, 3.2, 4 };
+final float[] TEAR_R     = { 1.5, 2, 2.5, 3.5 };
+
+// the current run
+int score = 0, best = 0, wave = 0, bossCount = 0, spawnLeft = 0, killsSinceDrop = 0;
+boolean bossWave = false, bossSpawned = false, newBest = false, bestLoaded = false;
+float spawnT = 0, waveIntro = 0;
+
+final int E_FROG = 0, E_JET = 1, E_BOSS = 2;
+final int PK_FIRE = 0, PK_SPREAD = 1, PK_DAMAGE = 2, PK_STORM = 3, PK_SHIELD = 4, PK_HEART = 5;
+final String[] FROG_LINES = { "WHAT AM I DOING", "IN SPACE?" };
+final String[] BOSS_LINES = { "WHAT ARE YOU DOING", "IN MY SPACE?!" };
+
+// Sad Man's lines. Each one is 1 or 2 short lines (keep them under ~22 letters).
+final String[][] MAN_START     = { { "HERE WE GO AGAIN..." }, { "I DIDN'T WANT TO", "GO TO SPACE" }, { "WHY IS IT", "ALWAYS ME?" } };
+final String[][] MAN_HIT       = { { "WHY ME?" }, { "OUCH. MY FEELINGS." }, { "THAT WAS RUDE" }, { "I'M OKAY.", "I'M NOT OKAY." }, { "THIS IS FINE." } };
+final String[][] MAN_LASTLIFE  = { { "ONE LIFE LEFT...", "JUST LIKE MY MOOD" }, { "THIS IS MY", "LAST LIFE. GREAT." } };
+final String[][] MAN_FIRE      = { { "I'M CRYING FASTER!" }, { "THE TEARS", "WON'T STOP!" } };
+final String[][] MAN_SPREAD    = { { "I CRY IN ALL", "DIRECTIONS NOW" }, { "MORE TEARS!", "MORE SADNESS!" } };
+final String[][] MAN_DAMAGE    = { { "BIGGER TEARS,", "BIGGER FEELINGS" }, { "THESE TEARS", "HIT HARD" } };
+final String[][] MAN_BOOST     = { { "MAXIMUM SADNESS!" }, { "EVEN SADDER.", "EVEN STRONGER." } };
+final String[][] MAN_STORM     = { { "I CAN'T STOP", "CRYING!!" }, { "TEAR STORM!", "NOBODY LOOK AT ME" } };
+final String[][] MAN_SHIELD    = { { "A BUBBLE! FINALLY", "SOME PERSONAL SPACE" }, { "MY SAFE SPACE" } };
+final String[][] MAN_HEART     = { { "SOMEBODY", "LOVES ME?" }, { "A HEART?", "FOR ME??" } };
+final String[][] MAN_BOSS      = { { "THAT IS A", "VERY BIG FROG" }, { "OH NO.", "IT HAS A CROWN." } };
+final String[][] MAN_BOSS_DOWN = { { "I WON...", "I'M STILL SAD THOUGH" }, { "SORRY, BIG FROG" } };
+final String[][] MAN_CLEAR     = { { "IS IT OVER?", "...NO. NEVER." }, { "I NEED A NAP" }, { "MORE FROGS?", "OF COURSE." } };
+final String[][] MAN_IDLE      = { { "SPACE IS SO COLD" }, { "I MISS MY MOM" }, { "THESE ARE NOT", "HAPPY TEARS" },
+                                   { "WHY ARE THERE", "FROGS IN SPACE?" }, { "MY CAPE IS WET" }, { "I SHOULD HAVE", "STAYED IN BED" },
+                                   { "DOES ANYONE HAVE", "A TISSUE?" } };
+final String[][] MAN_PAIN      = { { "EXISTENCE IS PAIN" }, { "EXISTENCE...", "IS PAIN" } };
+final String[][] MAN_WTF       = { { "WHAT THE HELL", "WAS THAT?" } };
+final String[][] MAN_WHY       = { { "...WHY?" } };
+final String[][] MAN_REPLY     = { { "ME TOO, BUDDY" }, { "SAME QUESTION" }, { "NOBODY KNOWS, FROG" } };
+final String[][] MAN_TITLE     = { { "PLEASE DON'T", "PRESS SPACE" }, { "I JUST WANTED", "A NAP" }, { "NOT THE FROGS", "AGAIN..." } };
+final String[][] MAN_NO_MPU    = { { "MY MPU ISN'T", "CONNECTED... SAD" }, { "I FEEL SO", "DISCONNECTED" }, { "WHERE IS MY MPU?" } };
+final String[][] MAN_MPU_ON    = { { "I CAN FEEL", "THE TILT NOW!" }, { "MPU CONNECTED!", "A RARE HAPPY MOMENT" } };
+
+String[] manLines = { "" };
+String[][] manNextPool = null;    // a follow-up line (e.g. "...WHY?")
+float manNextT = 0;
+
+// The random HUGE frog: says hi, licks a heart off Sad Man, leaves. Can't be dodged or hurt.
+final String[] HUGE_HI  = { "HEY I AM RANDOM" };
+final String[] HUGE_BYE = { "OK BYE" };
+boolean hugeOn = false, hugeHit = false, hugeNoDmg = false;
+int hugeState = 0, hugeTint = 0;      // states: 0 arriving, 1 talking, 2 tongue, 3 leaving
+float hugeX, hugeY, hugeT, hugeTongue, hugeCool = 90;
+float manSayT = 0, manQuiet = 0, manIdleT = 8, manReplyT = -1;
+int manPri = 0;
+boolean wasDemo = true;
+
+ArrayList<Enemy>    enemies = new ArrayList<Enemy>();
+ArrayList<Tear>     tears   = new ArrayList<Tear>();
+ArrayList<EShot>    eshots  = new ArrayList<EShot>();
+ArrayList<Pickup>   pickups = new ArrayList<Pickup>();
+ArrayList<Particle> parts   = new ArrayList<Particle>();
+ArrayList<Popup>    popups  = new ArrayList<Popup>();
+
+// background
+final int NGSTARS = 70;
+float[] gsX = new float[NGSTARS], gsY = new float[NGSTARS];
+int[] gsL = new int[NGSTARS];
+float planetX = 110, planetY = 40;
+int planetKind = 0;
+
+// ── Things in the game ────────────────────────────────────────────────
+class Enemy {
+  int type, tier, state, value, bossN, attack;
+  float x, y, vx, vy, baseX, amp, freq, phase, hp, maxHp, hw, hh;
+  float age, fireT, flash, flashCool, timer, targetY, sayAt = -1, sayLeft = 0;
+  float attackT, tongueWarn, tongueT, tongueX, wanderT;
+  boolean dead, deco;
+}
+
+class Tear {
+  float x, y, vx, vy, dmg;
+  int sz;
+  boolean dead;
+  Tear(float x0, float y0, float ang, float d, int s) {
+    x = x0; y = y0; dmg = d; sz = s;
+    vx = sin(ang) * 210;
+    vy = -cos(ang) * 210;
+  }
+}
+
+class EShot {
+  float x, y, vx, vy, r;
+  int kind;            // 0 jet pellet, 1 frog spit, 2 big boss spit
+  boolean dead;
+  EShot(float x0, float y0, float vx0, float vy0, int k) {
+    x = x0; y = y0; vx = vx0; vy = vy0; kind = k;
+    r = k == 0 ? 1.5 : k == 1 ? 2 : 2.5;
+  }
+}
+
+class Pickup {
+  float x, y, age;
+  int kind;
+  boolean dead;
+  Pickup(float x0, float y0, int k) { x = x0; y = y0; kind = k; }
+}
+
+class Particle {
+  float x, y, vx, vy, life, maxLife;
+  int col, sz;
+}
+
+class Popup {
+  float x, y, life;
+  String txt;
+  int col;
+}
+
+int rgb(int r, int g, int b) {
+  return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+// ── Entering / leaving ────────────────────────────────────────────────
+void enterGame() {
+  gameMode = true;
+  gState = G_TITLE;
+  gPaused = false;
+  keyL = keyR = false;
+  if (!bestLoaded) { loadBest(); bestLoaded = true; }
+  clearRun();
+  wasDemo = demoMode;
+  manSayT = 0; manIdleT = 3;
+  for (int i = 0; i < 3; i++) spawnTitleFrog(i);
+  initGameStars();
+  planetX = PF_R - 26; planetY = 76; planetKind = 0;
+  gLastMillis = millis();
+}
+
+void exitGame() {
+  gameMode = false;
+  keyL = keyR = false;
+}
+
+void clearRun() {
+  enemies.clear(); tears.clear(); eshots.clear();
+  pickups.clear(); parts.clear(); popups.clear();
+  bannerT = 0; shake = 0;
+  hugeOn = false; hugeCool = random(8, 30);    // first visit can be in wave 1
+  manNextPool = null;
+}
+
+void startRun() {
+  clearRun();
+  score = 0; wave = 0; bossCount = 0; lives = 3; killsSinceDrop = 0; newBest = false;
+  lvFire = 1; lvSpread = 1; lvDamage = 1; overcharge = 0;
+  stormT = 0; shieldT = 0; invuln = 1.5; fireT = 0.5; pX = PF_C;
+  gState = G_PLAY;
+  gPaused = false;
+  nextWave();
+  manSayT = 0;
+  manSay(MAN_START, 2);
+  manIdleT = random(10, 16);
+}
+
+void nextWave() {
+  wave++;
+  bossWave = wave % 5 == 0;          // a big frog every 5th wave
+  bossSpawned = false;
+  // after the first boss there are 40% more enemies per wave
+  spawnLeft = bossWave ? 0 : min(70, round((10 + wave * 3) * (bossCount >= 1 ? 1.4 : 1)));
+  spawnT = 0;
+  waveIntro = bossWave ? 3.0 : 2.2;
+  if (bossWave) manSay(MAN_BOSS, 2);
+}
+
+float hpMul()  { return (1 + 0.22 * (wave - 1) + 0.02 * sq(max(0, wave - 10))) * (bossCount >= 1 ? 1.15 : 1); }   // enemies get tougher...
+float spdMul() { return min(1.9, 1 + 0.05 * (wave - 1)); } // ...and faster every wave
+
+void loadBest() {
+  try {
+    File f = new File(sketchPath("sadman_highscore.txt"));
+    if (f.exists()) best = int(trim(loadStrings(f.getAbsolutePath())[0]));
+  } catch (Exception e) {
+    best = 0;
+  }
+}
+
+void saveBest() {
+  try {
+    saveStrings(sketchPath("sadman_highscore.txt"), new String[] { str(best) });
+  } catch (Exception e) {
+    println("Could not save the high score");
+  }
+}
+
+// ── Sad Man talking ──────────────────────────────────────────────────
+// pri 0 = chatter, 1 = buffs, 2 = big moments (hits, bosses). Chatter never interrupts.
+void manSay(String[][] pool, int pri) {
+  if (manSayT > 0 && pri < manPri) return;
+  if (pri == 0 && manQuiet > 0) return;
+  manLines = pool[(int) random(pool.length)];
+  manSayT = 2.6;
+  manPri = pri;
+  manQuiet = 4;
+}
+
+void updateManTalk(float dt) {
+  manSayT -= dt;
+  manQuiet -= dt;
+  if (manReplyT > 0) {
+    manReplyT -= dt;
+    if (manReplyT <= 0) manSay(MAN_REPLY, 1);
+  }
+  if (manNextPool != null) {
+    manNextT -= dt;
+    if (manNextT <= 0) { manSayT = 0; manSay(manNextPool, 3); manNextPool = null; }
+  }
+  manIdleT -= dt;
+  if (manIdleT <= 0) {
+    if (random(1) < 0.3) manSay(MAN_PAIN, 0);
+    else if (gState == G_TITLE) manSay(MAN_TITLE, 0);
+    else if (gState == G_PLAY) manSay(demoMode && random(1) < 0.6 ? MAN_NO_MPU : MAN_IDLE, 0);
+    manIdleT = gState == G_TITLE ? random(5, 8) : random(11, 18);
+  }
+  // the sensor started sending data in the middle of the game
+  if (wasDemo && !demoMode && gState != G_OVER) {
+    bannerText = "MPU CONNECTED!";
+    bannerT = 2.2;
+    manSay(MAN_MPU_ON, 2);
+  }
+  wasDemo = demoMode;
+}
+
+void gameKeyPressed() {
+  if (key == ESC) { key = 0; exitGame(); return; }     // Esc leaves the game instead of closing Processing
+  if (key == CODED) {
+    if (keyCode == LEFT)  keyL = true;
+    if (keyCode == RIGHT) keyR = true;
+    return;
+  }
+  char k = Character.toLowerCase(key);
+  if (k == 'a') keyL = true;
+  if (k == 'd') keyR = true;
+  if (k == 'c') {
+    calibrate();
+    if (!demoMode) popup("RECENTERED", pX, P_Y - 44, rgb(120, 255, 160));
+  }
+  if (k == 'p' && gState == G_PLAY) gPaused = !gPaused;
+  if (k == ' ' || k == ENTER || k == RETURN) {
+    if (gState == G_TITLE || (gState == G_OVER && overT > 1.0)) startRun();
+  }
+}
+
+void gameKeyReleased() {
+  if (key == CODED) {
+    if (keyCode == LEFT)  keyL = false;
+    if (keyCode == RIGHT) keyR = false;
+    return;
+  }
+  char k = Character.toLowerCase(key);
+  if (k == 'a') keyL = false;
+  if (k == 'd') keyR = false;
+}
+
+// ── Main game loop ────────────────────────────────────────────────────
+void drawGame() {
+  float dt = constrain((millis() - gLastMillis) / 1000.0, 0, 0.05);
+  gLastMillis = millis();
+  if (!gPaused) updateGame(dt);
+  renderGame();
+}
+
+void updateGame(float dt) {
+  gTime += dt;
+  scrollGameStars(dt);
+  shake = max(0, shake - dt * 14);
+  bannerT -= dt;
+  updateParticles(dt);
+  updateManTalk(dt);
+  if (gState == G_TITLE) { updateTitleFrogs(dt); return; }
+  if (gState == G_OVER)  { overT += dt; return; }
+  updatePlayer(dt);
+  updateWave(dt);
+  updateHuge(dt);
+  updateTears(dt);
+  updateEnemies(dt);
+  updateShots(dt);
+  updatePickups(dt);
+  cleanup();
+}
+
+// ── Sad Man ───────────────────────────────────────────────────────────
+void updatePlayer(float dt) {
+  float minX = PF_L + 9, maxX = PF_R - 9;
+  if (!demoMode) {
+    // tilt -> position: GAME_TILT_RANGE degrees either way reaches the edge
+    float tilt = GAME_USE_ROLL ? smoothRoll : smoothPitch;
+    if (GAME_INVERT) tilt = -tilt;
+    float tx = map(constrain(tilt, -GAME_TILT_RANGE, GAME_TILT_RANGE), -GAME_TILT_RANGE, GAME_TILT_RANGE, minX, maxX);
+    pX = lerp(pX, tx, min(1, dt * 14));
+  } else {
+    int dir = (keyR ? 1 : 0) - (keyL ? 1 : 0);
+    pX += dir * 140 * dt;
+  }
+  pX = constrain(pX, minX, maxX);
+
+  invuln  = max(0, invuln - dt);
+  stormT  = max(0, stormT - dt);
+  shieldT = max(0, shieldT - dt);
+  if (stormT > 0 && random(1) < dt * 25) {
+    burst(pX + random(-4, 4), P_Y - 3, rgb(200, 140, 255), rgb(255, 255, 255), 1, 25);
+  }
+
+  // automatic crying
+  fireT -= dt;
+  if (fireT <= 0) {
+    fireTears();
+    fireT += fireInterval();
+    if (fireT < 0) fireT = 0;
+  }
+}
+
+float fireInterval() {
+  float iv = 0.32 / (1 + 0.27 * (lvFire - 1));
+  return stormT > 0 ? iv * 0.45 : iv;
+}
+
+float tearDamage() { return DAMAGE_LV[lvDamage - 1] * (1 + 0.08 * overcharge); }
+int tearSize()     { return lvDamage <= 2 ? 0 : lvDamage <= 4 ? 1 : lvDamage == 5 ? 2 : 3; }
+
+void fireTears() {
+  int lv = min(SPREAD_N.length, lvSpread + (stormT > 0 ? 2 : 0));
+  int n = SPREAD_N[lv - 1];
+  float spread = SPREAD_DEG[lv - 1];
+  float d = tearDamage();
+  int s = tearSize();
+  eyeToggle = !eyeToggle;
+  for (int i = 0; i < n; i++) {
+    float a = n == 1 ? 0 : map(i, 0, n - 1, -spread / 2, spread / 2);
+    float ex = a < 0 ? pX - 1.5 : a > 0 ? pX + 1.5 : (eyeToggle ? pX - 1.5 : pX + 1.5);
+    tears.add(new Tear(ex, P_Y - 3, radians(a), d, s));
+  }
+}
+
+void hitPlayer() {
+  lives--;
+  invuln = 2.0;
+  shake = max(shake, 6);
+  burst(pX, P_Y, rgb(75, 110, 205), rgb(255, 255, 255), 22, 70);
+  for (EShot s : eshots) if (dist(s.x, s.y, pX, P_Y) < 50) s.dead = true;
+  if (lives <= 0) gameOver();
+  else manSay(lives == 1 ? MAN_LASTLIFE : MAN_HIT, 2);
+}
+
+void gameOver() {
+  gState = G_OVER;
+  overT = 0;
+  manSayT = 0;
+  burst(pX, P_Y, rgb(110, 190, 255), rgb(255, 255, 255), 40, 90);
+  if (score > best) { best = score; newBest = true; saveBest(); }
+}
+
+// ── Waves ─────────────────────────────────────────────────────────────
+void updateWave(float dt) {
+  if (waveIntro > 0) {
+    waveIntro -= dt;
+    if (waveIntro <= 0 && bossWave && !bossSpawned) spawnBoss();
+    return;
+  }
+  if (spawnLeft > 0) {
+    if (!hugeOn) spawnT -= dt;                 // the huge frog gets everyone's attention
+    if (spawnT <= 0) {
+      spawnEnemy();
+      spawnT = max(0.2, 1.05 - 0.045 * wave) * (bossCount >= 1 ? 0.8 : 1) * random(0.6, 1.4);
+    }
+  } else if ((!bossWave || bossSpawned) && liveEnemies() == 0) {
+    if (!bossWave) dropPickup(PF_C + random(-40, 40), -6, pickPermanent());  // reward for clearing a wave
+    if (!bossWave && wave % 5 != 4 && random(1) < 0.4) manSay(MAN_CLEAR, 1);
+    nextWave();
+  }
+}
+
+int liveEnemies() {
+  int n = 0;
+  for (Enemy e : enemies) if (!e.dead && !e.deco) n++;
+  return n;
+}
+
+void spawnEnemy() {
+  spawnLeft--;
+  float jetP  = wave >= 2 ? min(0.30, 0.10 + 0.025 * wave) : 0;
+  float redP  = wave >= 6 ? min(0.22, 0.02 + 0.02 * wave) : 0;
+  float blueP = wave >= 3 ? min(0.30, 0.04 + 0.025 * wave) : 0;
+  float zapP  = wave >= 4 ? min(0.22, 0.08 + 0.012 * wave) : 0;
+  float r = random(1);
+  if (r < zapP) spawnZapRow();
+  else if ((r -= zapP) < jetP) {
+    if (wave >= 7 && random(1) < 0.35 && spawnLeft >= 2) {      // a V of three jets
+      float bx = random(PF_L + 30, PF_R - 30);
+      for (int i = -1; i <= 1; i++) spawnJet(bx + i * 14, -10 - abs(i) * 10, 0);
+      spawnLeft -= 2;
+    } else {
+      spawnJet(random(PF_L + 22, PF_R - 22), -10, random(8, 22));
+    }
+  } else if (r < jetP + redP) spawnFrog(2);
+  else if (r < jetP + redP + blueP) spawnFrog(1);
+  else if (bossCount >= 1 && spawnLeft >= 1 && random(1) < 0.35) {   // after the first boss: frogs in little gangs
+    int n = min(spawnLeft + 1, random(1) < 0.5 ? 2 : 3);
+    float bx = random(PF_L + 22, PF_R - 22 - 18 * (n - 1));
+    for (int i = 0; i < n; i++) {
+      Enemy f = spawnFrog(wave >= 8 && i == 1 ? 1 : 0);
+      f.amp = 4; f.baseX = bx + i * 18; f.y = -8 - i * 4; f.phase = 0;
+    }
+    spawnLeft -= n - 1;
+  }
+  else spawnFrog(0);
+}
+
+// lightning frogs: line up at the top, crackle, then ZAP straight down one after another
+void spawnZapRow() {
+  int n = bossCount >= 1 ? (random(1) < 0.5 ? 3 : 2) : 1;
+  n = min(n, spawnLeft + 1);
+  float gap = 30, x0 = random(PF_L + 14, PF_R - 14 - gap * (n - 1));
+  float ty = random(14, 24), charge = max(1.1, 2.3 - 0.04 * wave);
+  for (int i = 0; i < n; i++) {
+    Enemy f = spawnFrog(3);
+    f.baseX = f.x = x0 + i * gap;
+    f.targetY = ty;
+    f.timer = charge + i * 0.35;
+  }
+  spawnLeft -= n - 1;
+}
+
+Enemy spawnFrog(int tier) {
+  Enemy e = new Enemy();
+  e.type = E_FROG; e.tier = tier; e.hw = 6; e.hh = 5;
+  e.amp = tier >= 2 ? 0 : random(3, 14);
+  e.freq = random(0.8, 1.8);
+  e.phase = random(TWO_PI);
+  e.baseX = random(PF_L + 10 + e.amp, PF_R - 10 - e.amp);
+  e.x = e.baseX; e.y = -8;
+  float sp = spdMul();
+  if (tier == 0) { e.hp = 2 * hpMul(); e.vy = random(15, 23) * sp; e.value = 10; e.fireT = wave >= 12 && random(1) < 0.3 ? random(1.5, 3) : -1; }
+  if (tier == 1) { e.hp = 6 * hpMul(); e.vy = random(18, 26) * sp; e.value = 25; e.fireT = random(1.0, 2.5); }
+  if (tier == 2) { e.hp = 4 * hpMul(); e.vy = 32 * sp; e.value = 30; e.targetY = random(30, 70); }
+  if (tier == 3) { e.amp = 0; e.hp = 3 * hpMul(); e.vy = 0; e.value = 35; e.targetY = 18; e.timer = 2; }
+  e.maxHp = e.hp;
+  if (random(1) < 0.35 && tier != 3) e.sayAt = random(0.8, 4);
+  enemies.add(e);
+  return e;
+}
+
+void spawnJet(float x, float y, float amp) {
+  Enemy e = new Enemy();
+  e.type = E_JET; e.hw = 5; e.hh = 5;
+  e.amp = amp; e.freq = random(1.5, 2.5); e.phase = random(TWO_PI);
+  e.baseX = constrain(x, PF_L + 8 + amp, PF_R - 8 - amp);
+  e.x = e.baseX; e.y = y;
+  e.vy = random(34, 44) * spdMul();
+  e.hp = 3 * hpMul(); e.maxHp = e.hp;
+  e.value = 20;
+  e.fireT = random(0.5, 1.2);
+  enemies.add(e);
+}
+
+void spawnBoss() {
+  bossSpawned = true;
+  bossCount++;
+  Enemy e = new Enemy();
+  e.type = E_BOSS; e.bossN = bossCount;
+  e.hw = 20; e.hh = 15;
+  e.x = PF_C; e.y = -24;
+  e.hp = 280 * pow(2.0, bossCount - 1); e.maxHp = e.hp;
+  e.value = 500 * bossCount;
+  e.sayAt = 0.5;
+  enemies.add(e);
+}
+
+// ── Enemies ───────────────────────────────────────────────────────────
+void updateEnemies(float dt) {
+  float sp = spdMul();
+  for (int i = 0; i < enemies.size(); i++) {
+    Enemy e = enemies.get(i);
+    if (e.dead) continue;
+    e.age += dt;
+    e.flash -= dt;
+    e.flashCool -= dt;
+    if (e.type == E_FROG) updateFrog(e, dt, sp);
+    else if (e.type == E_JET) updateJet(e, dt, sp);
+    else updateBoss(e, dt, sp);
+    updateSpeech(e);
+    if (e.y > GH + 24 || e.x < PF_L - 30 || e.x > PF_R + 30) { e.dead = true; continue; }
+
+    // bumping into Sad Man
+    if (abs(e.x - pX) < e.hw + 2.5 && abs(e.y - (P_Y + 1)) < e.hh + 5) {
+      if (e.type == E_BOSS) { if (shieldT <= 0 && invuln <= 0) hitPlayer(); }
+      else if (shieldT > 0) killEnemy(e);
+      else if (invuln <= 0) { killEnemy(e); hitPlayer(); }
+    }
+  }
+}
+
+void updateFrog(Enemy e, float dt, float sp) {
+  if (e.tier == 3) {                         // lightning frog
+    if (e.state == 0) {                      // fly in and line up at the top
+      e.y += 40 * dt;
+      if (e.y >= e.targetY) { e.y = e.targetY; e.state = 1; }
+    } else if (e.state == 1) {               // charge up (its lane flashes on screen)
+      e.timer -= dt;
+      if (random(1) < dt * 30) burst(e.x + random(-7, 7), e.y + random(-6, 6), rgb(255, 240, 120), rgb(140, 230, 255), 1, 20);
+      if (e.timer <= 0) { e.state = 2; e.vy = 230 * sp; shake = max(shake, 1); }
+    } else {                                 // ZAP!
+      e.y += e.vy * dt;
+      burst(e.x + random(-3, 3), e.y - 7, rgb(255, 240, 120), rgb(255, 255, 255), 1, 10);
+    }
+    return;
+  }
+  if (e.tier == 2) {                         // red frog: stops, wiggles, then dives at you
+    if (e.state == 0) {
+      e.y += e.vy * dt;
+      if (e.y >= e.targetY) { e.state = 1; e.timer = 0.7; }
+    } else if (e.state == 1) {
+      e.timer -= dt;
+      if (e.timer <= 0) {
+        float dx = pX - e.x, dy = P_Y - e.y, m = max(1, sqrt(dx * dx + dy * dy));
+        e.vx = dx / m * 95 * sp;
+        e.vy = dy / m * 95 * sp;
+        e.state = 2;
+      }
+    } else {
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+    }
+    return;
+  }
+  float hop = 0.55 + 0.9 * max(0, sin(e.age * 4 + e.phase));
+  e.y += e.vy * hop * dt;
+  e.x = e.baseX + sin(e.age * e.freq + e.phase) * e.amp;
+  if (e.tier == 1) {                         // blue frog: spits (three at a time later on)
+    e.fireT -= dt;
+    if (e.fireT <= 0 && e.y > 0 && e.y < 140) {
+      if (wave >= 14) for (int k = -1; k <= 1; k++) aimShot(e.x, e.y + 5, 50 * sp, 1, k * 15);
+      else if (wave >= 8) aimShot(e.x, e.y + 5, 50 * sp, 1, 0);
+      else eshots.add(new EShot(e.x, e.y + 5, 0, 48 * sp, 1));
+      e.fireT = random(2.2, 3.6) / sqrt(sp);
+    }
+  } else if (e.fireT > 0) {                  // from wave 12 some green frogs spit once too
+    e.fireT -= dt;
+    if (e.fireT <= 0 && e.y > 0 && e.y < 130) aimShot(e.x, e.y + 5, 48 * sp, 1, 0);
+    else if (e.fireT <= 0) e.fireT = 0.3;
+  }
+}
+
+void updateJet(Enemy e, float dt, float sp) {
+  e.y += e.vy * dt;
+  e.x = e.baseX + sin(e.age * e.freq + e.phase) * e.amp;
+  e.fireT -= dt;
+  int maxShots = wave < 4 ? 1 : wave < 9 ? 2 : 3;
+  if (e.fireT <= 0 && e.attack < maxShots && e.y > 4 && e.y < 140) {
+    if (wave >= 12) for (int k = -1; k <= 1; k++) aimShot(e.x, e.y + 6, 64 * sp, 0, k * 11);
+    else if (wave >= 4) aimShot(e.x, e.y + 6, 64 * sp, 0, random(-6, 6));
+    else eshots.add(new EShot(e.x, e.y + 6, 0, 60 * sp, 0));
+    e.attack++;
+    e.fireT = max(0.55, 2.0 - 0.07 * wave);
+  }
+}
+
+void aimShot(float x, float y, float speed, int kind, float offDeg) {
+  float a = atan2(P_Y - y, pX - x) + radians(offDeg);
+  eshots.add(new EShot(x, y, cos(a) * speed, sin(a) * speed, kind));
+}
+
+void updateBoss(Enemy e, float dt, float sp) {
+  if (e.state == 0) {                        // flying in
+    e.y += 22 * dt;
+    if (e.y >= 52) { e.y = 52; e.state = 1; e.attackT = 1.2; }
+    return;
+  }
+  boolean angry = e.hp < e.maxHp * 0.5;
+  if (e.tongueWarn > 0) {                    // slides over Sad Man, stops, then...
+    e.tongueWarn -= dt;
+    if (e.tongueWarn > 0.45) e.x = lerp(e.x, constrain(pX, PF_L + 24, PF_R - 24), min(1, dt * 5));
+    if (e.tongueWarn <= 0) { e.tongueT = 0.6; e.tongueX = e.x; shake = max(shake, 2); }
+    return;
+  }
+  if (e.tongueT > 0) {                       // ...TONGUE!
+    e.tongueT -= dt;
+    float reach = (e.y + 4) + (GH - e.y - 4) * min(1, (0.6 - e.tongueT) / 0.08);
+    if (reach > P_Y - 6 && abs(pX - e.tongueX) < 5 && shieldT <= 0 && invuln <= 0) hitPlayer();
+    return;
+  }
+  e.wanderT += dt;
+  e.x = lerp(e.x, PF_C + sin(e.wanderT * 0.7) * 58, min(1, dt * 2));
+  e.y = 52 + sin(e.wanderT * 1.3) * 3;
+  e.attackT -= dt * (angry ? 1.5 : 1);
+  if (e.attackT <= 0) {
+    int a = e.attack % 4;
+    e.attack++;
+    if (a == 0) bossFan(e, sp);
+    else if (a == 1) e.tongueWarn = 1.0;
+    else if (a == 2) bossSummon(e);
+    else for (int k = -1; k <= 1; k++) aimShot(e.x, e.y + 6, 70 * sp, 2, k * 12);
+    e.attackT = max(1.3, 2.8 - 0.25 * (e.bossN - 1));
+  }
+  if (e.sayLeft <= 0 && e.sayAt < 0 && random(1) < dt * 0.08) e.sayAt = e.age;
+}
+
+void bossFan(Enemy e, float sp) {
+  int n = 5 + 2 * min(3, e.bossN - 1) + (e.hp < e.maxHp * 0.5 ? 2 : 0);
+  for (int i = 0; i < n; i++) {
+    float a = radians(90 + map(i, 0, n - 1, -40, 40));
+    eshots.add(new EShot(e.x, e.y + 6, cos(a) * 52 * sp, sin(a) * 52 * sp, 2));
+  }
+}
+
+void bossSummon(Enemy e) {
+  for (int i = -1; i <= 1; i++) {
+    Enemy f = spawnFrog(e.bossN >= 2 && i == 0 ? 1 : 0);
+    f.baseX = constrain(e.x + i * 22, PF_L + 12 + f.amp, PF_R - 12 - f.amp);
+    f.y = e.y + 8;
+    f.sayAt = -1;
+  }
+}
+
+void updateSpeech(Enemy e) {
+  if (e.sayLeft > 0) return;
+  if (e.sayAt >= 0 && e.age >= e.sayAt) {
+    if (canTalk(e)) {
+      e.sayLeft = 2.6;
+      e.sayAt = -1;
+      if (e.type == E_FROG && random(1) < 0.35 && manSayT <= 0) manReplyT = 1.3;   // "ME TOO, BUDDY"
+    }
+    else e.sayAt = e.age + 0.6;
+  }
+}
+
+// at most 2 speech bubbles at once (1 on the title screen), and never on top of each other
+boolean canTalk(Enemy e) {
+  if (e.y <= 8) return false;
+  int n = 0;
+  for (Enemy o : enemies) {
+    if (o.dead || o.sayLeft <= 0 || o == e) continue;
+    n++;
+    if (abs(o.x - e.x) < 75 && abs(o.y - e.y) < 30) return false;
+  }
+  return n < (gState == G_TITLE ? 1 : 2);
+}
+
+void damageEnemy(Enemy e, float d, float hx, float hy) {
+  e.hp -= d;
+  if (e.flashCool <= 0) {              // flash white when hit (not every hit, or the boss would stay white)
+    e.flash = 0.06;
+    e.flashCool = e.type == E_BOSS ? 0.25 : 0.12;
+  }
+  burst(hx, hy, rgb(150, 210, 255), rgb(255, 255, 255), 3, 30);
+  if (e.hp <= 0) killEnemy(e);
+}
+
+void killEnemy(Enemy e) {
+  if (e.dead) return;
+  e.dead = true;
+  score += e.value + wave * 2;
+  if (e.type == E_BOSS) { bossDown(e); return; }
+  int c1 = e.type == E_JET ? rgb(255, 170, 60) : frogColor(e.tier);
+  burst(e.x, e.y, c1, rgb(255, 255, 200), 14, 60);
+  shake = max(shake, 1.2);
+  killsSinceDrop++;
+  float chance = (e.type == E_JET ? 0.15 : e.tier == 1 ? 0.16 : e.tier >= 2 ? 0.13 : 0.09) + min(0.06, 0.003 * wave);
+  if (random(1) < chance || killsSinceDrop >= 22) dropPickup(e.x, e.y, pickKind());
+}
+
+int frogColor(int tier) {
+  return tier == 0 ? rgb(95, 190, 70) : tier == 1 ? rgb(85, 150, 235) : tier == 2 ? rgb(235, 95, 70) : rgb(255, 220, 60);
+}
+
+void bossDown(Enemy e) {
+  for (int i = 0; i < 5; i++) burst(e.x + random(-18, 18), e.y + random(-14, 14), rgb(95, 190, 70), rgb(255, 220, 90), 24, 90);
+  shake = 9;
+  bannerText = "BOSS DEFEATED!";
+  bannerT = 2.6;
+  manSay(MAN_BOSS_DOWN, 2);
+  dropPickup(e.x - 16, e.y, pickPermanent());
+  dropPickup(e.x + 16, e.y, pickPermanent());
+  dropPickup(e.x, e.y - 8, random(1) < 0.5 ? PK_STORM : PK_SHIELD);
+  if (lives < 5) dropPickup(e.x, e.y + 10, PK_HEART);
+  for (EShot s : eshots) s.dead = true;
+}
+
+// ── The random HUGE frog ─────────────────────────────────────────────
+void updateHuge(float dt) {
+  if (!hugeOn) {
+    hugeCool -= dt;
+    boolean bossAlive = false;
+    for (Enemy e : enemies) if (!e.dead && e.type == E_BOSS) bossAlive = true;
+    if (hugeCool <= 0 && !bossWave && !bossAlive && waveIntro <= 0 && lives >= 2
+        && invuln <= 0 && shieldT <= 0 && random(1) < dt * 0.3) startHuge();
+    return;
+  }
+  hugeT += dt;
+  if (hugeState == 0) {                      // slides in from the top
+    hugeY = lerp(hugeY, 36, min(1, dt * 3));
+    if (hugeT > 1.0) { hugeState = 1; hugeT = 0; }
+  } else if (hugeState == 1) {               // "HEY I AM RANDOM"
+    if (hugeT > 2.0) { hugeState = 2; hugeT = 0; hugeHit = false; }
+  } else if (hugeState == 2) {               // tongue: follows Sad Man, so there's no dodging it
+    hugeTongue = min(1, hugeT / 0.22);
+    if (hugeTongue >= 1 && !hugeHit) {
+      hugeHit = true;
+      if (lives > 1) lives--;
+      invuln = 2;
+      shake = 9;
+      burst(pX, P_Y - 4, rgb(255, 120, 160), rgb(255, 255, 255), 30, 80);
+      popup("-1 HEART", pX, P_Y - 44, rgb(255, 90, 120));
+      manSayT = 0;
+      manSay(MAN_WTF, 3);
+      manNextPool = MAN_WHY;
+      manNextT = 2.8;
+    }
+    if (hugeT > 0.6) hugeTongue = max(0, 1 - (hugeT - 0.6) / 0.25);
+    if (hugeT > 0.85) { hugeState = 3; hugeT = 0; hugeTongue = 0; }
+  } else {                                   // "OK BYE", then leaves
+    if (hugeT > 1.2) hugeY -= 70 * dt;
+    if (hugeY < -50) { hugeOn = false; hugeCool = random(110, 180); }
+  }
+}
+
+void startHuge() {
+  hugeOn = true;
+  hugeState = 0; hugeT = 0; hugeTongue = 0;
+  hugeX = PF_C + random(-30, 30);
+  hugeY = -40;
+  hugeNoDmg = false;
+  int[] tints = { rgb(190, 120, 255), rgb(255, 130, 200), rgb(255, 170, 80), rgb(90, 230, 210) };
+  hugeTint = tints[(int) random(tints.length)];
+}
+
+// ── Tears and enemy shots ─────────────────────────────────────────────
+void updateTears(float dt) {
+  for (Tear tr : tears) {
+    if (tr.dead) continue;
+    tr.x += tr.vx * dt;
+    tr.y += tr.vy * dt;
+    if (tr.y < -10 || tr.x < PF_L - 6 || tr.x > PF_R + 6) { tr.dead = true; continue; }
+    if (hugeOn && abs(tr.x - hugeX) < 28 && tr.y < hugeY + 22 && tr.y > hugeY - 26) {   // tears do nothing to it
+      tr.dead = true;
+      burst(tr.x, tr.y, rgb(180, 180, 200), rgb(255, 255, 255), 2, 25);
+      if (!hugeNoDmg && hugeState >= 1) { hugeNoDmg = true; popup("NO DAMAGE!", hugeX, 96, rgb(210, 210, 230)); }
+      continue;
+    }
+    float rad = TEAR_R[tr.sz];
+    for (int i = 0; i < enemies.size(); i++) {
+      Enemy e = enemies.get(i);
+      if (e.dead || e.deco || e.y < -e.hh) continue;
+      if (abs(tr.x - e.x) < e.hw + rad && abs(tr.y - e.y) < e.hh + rad) {
+        tr.dead = true;
+        damageEnemy(e, tr.dmg, tr.x, tr.y);
+        break;
+      }
+    }
+  }
+}
+
+void updateShots(float dt) {
+  for (EShot s : eshots) {
+    if (s.dead) continue;
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    if (s.y > GH + 6 || s.y < -10 || s.x < PF_L - 6 || s.x > PF_R + 6) { s.dead = true; continue; }
+    if (abs(s.x - pX) < 2.5 + s.r && abs(s.y - (P_Y + 1)) < 5 + s.r) {
+      s.dead = true;
+      if (shieldT > 0) burst(s.x, s.y, rgb(120, 220, 255), rgb(255, 255, 255), 5, 30);
+      else if (invuln <= 0) hitPlayer();
+    }
+  }
+}
+
+// ── Buffs ─────────────────────────────────────────────────────────────
+int pickKind() {
+  float r = random(1);
+  if (r < 0.05 && lives < 5) return PK_HEART;
+  if (r < 0.17) return random(1) < 0.5 ? PK_STORM : PK_SHIELD;
+  return pickPermanent();
+}
+
+// favours whichever upgrade is furthest from its max, so Sad Man grows evenly
+int pickPermanent() {
+  float wF = (MAX_FIRE - lvFire) / (float) MAX_FIRE + 0.12;
+  float wS = (MAX_SPREAD - lvSpread) / (float) MAX_SPREAD + 0.12;
+  float wD = (MAX_DAMAGE - lvDamage) / (float) MAX_DAMAGE + 0.12;
+  float r = random(wF + wS + wD);
+  return r < wF ? PK_FIRE : r < wF + wS ? PK_SPREAD : PK_DAMAGE;
+}
+
+void dropPickup(float x, float y, int kind) {
+  pickups.add(new Pickup(constrain(x, PF_L + 8, PF_R - 8), y, kind));
+  killsSinceDrop = 0;
+}
+
+void updatePickups(float dt) {
+  for (Pickup p : pickups) {
+    if (p.dead) continue;
+    p.age += dt;
+    p.y += 24 * dt;
+    float dx = pX - p.x;
+    if (abs(dx) < 34 && p.y > P_Y - 60) p.x += constrain(dx, -1, 1) * 30 * dt;   // gentle magnet
+    if (abs(dx) < 10 && abs(p.y - P_Y) < 13) { collect(p.kind, p.x, p.y); p.dead = true; }
+    if (p.y > GH + 10) p.dead = true;
+  }
+}
+
+int pickupColor(int k) {
+  if (k == PK_FIRE)   return rgb(255, 205, 50);
+  if (k == PK_SPREAD) return rgb(70, 215, 255);
+  if (k == PK_DAMAGE) return rgb(255, 85, 75);
+  if (k == PK_STORM)  return rgb(185, 110, 255);
+  if (k == PK_SHIELD) return rgb(90, 140, 255);
+  return rgb(255, 95, 150);
+}
+
+float superTime() { return 6 + min(6, 0.3 * wave); }   // timed buffs last longer later on
+
+void collect(int k, float x, float y) {
+  String msg = "";
+  int c = pickupColor(k);
+  boolean maxed = false;
+  if (k == PK_FIRE)   { if (lvFire < MAX_FIRE)     { lvFire++;   msg = "FIRE RATE UP"; } else maxed = true; }
+  if (k == PK_SPREAD) { if (lvSpread < MAX_SPREAD) { lvSpread++; msg = "MORE TEARS"; }   else maxed = true; }
+  if (k == PK_DAMAGE) { if (lvDamage < MAX_DAMAGE) { lvDamage++; msg = "BIGGER TEARS"; } else maxed = true; }
+  if (maxed) { overcharge++; msg = "BOOST +" + (overcharge * 8) + "%"; c = rgb(255, 150, 60); }
+  if (k == PK_STORM)  { stormT = max(stormT, 0) + superTime();   stormMax = stormT;   msg = "TEAR STORM!"; }
+  if (k == PK_SHIELD) { shieldT = max(shieldT, 0) + superTime(); shieldMax = shieldT; msg = "SHIELD!"; }
+  if (k == PK_HEART)  { lives = min(5, lives + 1); msg = "+1 LIFE"; }
+  if (k == PK_FIRE && !maxed && random(1) < 0.5)   manSay(MAN_FIRE, 0);
+  if (k == PK_SPREAD && !maxed && random(1) < 0.5) manSay(MAN_SPREAD, 0);
+  if (k == PK_DAMAGE && !maxed && random(1) < 0.5) manSay(MAN_DAMAGE, 0);
+  if (maxed && random(1) < 0.4) manSay(MAN_BOOST, 0);
+  if (k == PK_STORM)  manSay(MAN_STORM, 1);
+  if (k == PK_SHIELD) manSay(MAN_SHIELD, 1);
+  if (k == PK_HEART)  manSay(MAN_HEART, 1);
+  score += 25;
+  popup(msg, x, P_Y - 44, c);
+  burst(x, y, c, rgb(255, 255, 255), 10, 40);
+}
+
+// ── Effects ───────────────────────────────────────────────────────────
+void burst(float x, float y, int c1, int c2, int n, float spd) {
+  for (int i = 0; i < n && parts.size() < 700; i++) {
+    Particle p = new Particle();
+    float a = random(TWO_PI), s = random(0.25, 1) * spd;
+    p.x = x; p.y = y;
+    p.vx = cos(a) * s; p.vy = sin(a) * s;
+    p.life = p.maxLife = random(0.3, 0.75);
+    p.col = random(1) < 0.5 ? c1 : c2;
+    p.sz = random(1) < 0.25 ? 2 : 1;
+    parts.add(p);
+  }
+}
+
+void popup(String txt, float x, float y, int col) {
+  if (popups.size() > 5) popups.remove(0);
+  Popup p = new Popup();
+  p.txt = txt; p.x = x; p.y = y; p.col = col; p.life = 1.3;
+  popups.add(p);
+}
+
+void updateParticles(float dt) {
+  for (int i = parts.size() - 1; i >= 0; i--) {
+    Particle p = parts.get(i);
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 1 - 2.5 * dt;
+    p.vy *= 1 - 2.5 * dt;
+    p.life -= dt;
+    if (p.life <= 0) parts.remove(i);
+  }
+  for (int i = popups.size() - 1; i >= 0; i--) {
+    Popup p = popups.get(i);
+    p.y -= 12 * dt;
+    p.life -= dt;
+    if (p.life <= 0) popups.remove(i);
+  }
+}
+
+void cleanup() {
+  for (int i = tears.size() - 1; i >= 0; i--)   if (tears.get(i).dead)   tears.remove(i);
+  for (int i = eshots.size() - 1; i >= 0; i--)  if (eshots.get(i).dead)  eshots.remove(i);
+  for (int i = enemies.size() - 1; i >= 0; i--) if (enemies.get(i).dead) enemies.remove(i);
+  for (int i = pickups.size() - 1; i >= 0; i--) if (pickups.get(i).dead) pickups.remove(i);
+}
+
+// ── Title screen frogs ────────────────────────────────────────────────
+void spawnTitleFrog(int i) {
+  Enemy e = new Enemy();
+  e.type = E_FROG; e.deco = true; e.tier = i % 3; e.hw = 6; e.hh = 5;
+  e.x = random(PF_L + 15, PF_R - 15);
+  e.y = random(114, 130);
+  e.vx = random(10, 18) * (random(1) < 0.5 ? -1 : 1);
+  e.vy = random(-7, 7);
+  e.phase = random(TWO_PI);
+  e.sayAt = 0.8 + i * 2.2;
+  enemies.add(e);
+}
+
+void updateTitleFrogs(float dt) {
+  for (Enemy e : enemies) {
+    e.age += dt;
+    e.x += e.vx * dt;
+    e.y += e.vy * dt;
+    if (e.x < PF_L + 10 || e.x > PF_R - 10) e.vx = -e.vx;
+    if (e.y < 112 || e.y > 132) e.vy = -e.vy;
+    e.x = constrain(e.x, PF_L + 10, PF_R - 10);
+    e.y = constrain(e.y, 112, 132);
+    if (e.sayLeft > 0) e.sayLeft -= dt;
+    updateSpeech(e);
+    if (e.sayLeft <= 0 && e.sayAt < 0) e.sayAt = e.age + random(2, 5);
+  }
+}
+
+// ── Stars and planets ─────────────────────────────────────────────────
+void initGameStars() {
+  for (int i = 0; i < NGSTARS; i++) {
+    gsX[i] = random(PF_L, PF_R);
+    gsY[i] = random(GH);
+    gsL[i] = i % 3;
+  }
+}
+
+void scrollGameStars(float dt) {
+  float[] spd = { 6, 14, 30 };
+  for (int i = 0; i < NGSTARS; i++) {
+    gsY[i] += spd[gsL[i]] * dt;
+    if (gsY[i] > GH) { gsY[i] = 0; gsX[i] = random(PF_L, PF_R); }
+  }
+  planetY += 2.5 * dt;
+  if (planetY > GH + 30) {
+    planetY = -30;
+    planetX = random(PF_L + 20, PF_R - 20);
+    planetKind = 1 - planetKind;
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Drawing the game
+// ════════════════════════════════════════════════════════════════════
+void renderGame() {
+  int np = max(1, min(width / GW, height / GH));
+  if (np != PX || artPX != np) { PX = np; buildArt(); }
+  int sx = 0, sy = 0;
+  if (shake > 0.5 && !gPaused) {
+    sx = round(random(-shake, shake) * 0.5);
+    sy = round(random(-shake, shake) * 0.5);
+  }
+  gox = (width - GW * PX) / 2 + sx * PX;
+  goy = (height - GH * PX) / 2 + sy * PX;
+
+  PGraphicsOpenGL pg = (PGraphicsOpenGL) g;
+  pg.textureSampling(2);                 // keep the pixels crisp and blocky
+  hint(DISABLE_DEPTH_TEST);
+  camera();
+  ortho();
+  noLights();
+  noStroke();
+  noTint();
+  imageMode(CORNER);
+  rectMode(CORNER);
+  background(0);
+
+  fill(rgb(7, 6, 22));
+  pixRect(PF_L, 0, PF_R - PF_L, GH);
+  drawPlanet();
+  drawGameStars();
+  if (gState == G_TITLE) blitC(sprManBig, PF_C, 100 + sin(gTime * 2) * 3);
+  drawHuge();
+  drawPickups();
+  drawTongues();
+  drawEnemies();
+  drawEShots();
+  if (gState == G_PLAY) drawPlayer();
+  drawHugeTongue();
+  drawTears();
+  drawParticles();
+  drawBubbles();
+  if (manSayT > 0 && gState == G_PLAY)  drawBubble(pX, P_Y - 12, manLines, true);
+  if (manSayT > 0 && gState == G_TITLE) drawBubble(PF_C, 75 + sin(gTime * 2) * 3, manLines, true);
+  drawPopups();
+  drawBossBar();
+  drawPanels();
+  if (gState == G_TITLE) drawTitle();
+  else if (gState == G_OVER) drawGameOver();
+  else {
+    drawWaveText();
+    if (gPaused) drawPause();
+  }
+  if (demoMode && gState != G_TITLE) drawNoMpuStrip();
+
+  perspective();
+  hint(ENABLE_DEPTH_TEST);
+  pg.textureSampling(5);
+}
+
+// draw a sprite centred on a game position
+void blitC(PImage img, float cx, float cy) {
+  int w = img.width / PX, h = img.height / PX;
+  image(img, gox + (round(cx) - w / 2) * PX, goy + (round(cy) - h / 2) * PX);
+}
+
+// a rectangle in game pixels
+void pixRect(float x, float y, float w, float h) {
+  rect(gox + round(x) * PX, goy + round(y) * PX, round(w) * PX, round(h) * PX);
+}
+
+void drawPlanet() {
+  blitC(planetKind == 0 ? sprPlanetA : sprPlanetB, planetX, planetY);
+}
+
+void drawGameStars() {
+  for (int i = 0; i < NGSTARS; i++) {
+    int L = gsL[i];
+    boolean twinkle = L == 2 && ((i * 7 + frameCount / 6) % 23 == 0);
+    fill(twinkle ? rgb(255, 255, 255) : L == 0 ? rgb(60, 60, 105) : L == 1 ? rgb(120, 120, 180) : rgb(210, 210, 255));
+    pixRect(gsX[i], gsY[i], 1, 1);
+  }
+}
+
+void drawPickups() {
+  for (Pickup p : pickups) {
+    if (p.dead) continue;
+    float bob = sin(p.age * 6) * 1.5;
+    blitC(sprIcon[p.kind], p.x, p.y + bob);
+  }
+}
+
+void drawEnemies() {
+  for (Enemy e : enemies) {
+    if (e.dead) continue;
+    boolean fl = e.flash > 0;
+    if (e.type == E_FROG) {
+      int fr = sin(e.age * 4 + e.phase) > 0 ? 1 : 0;
+      float wx = (e.tier >= 2 && e.state == 1) ? (frameCount % 4 < 2 ? -1 : 1) : 0;
+      blitC(fl ? sprFrogW[e.tier][fr] : sprFrog[e.tier][fr], e.x + wx, e.y);
+    } else if (e.type == E_JET) {
+      if ((frameCount / 3) % 2 == 0) { fill(rgb(255, 150, 40)); pixRect(round(e.x), round(e.y) - 8, 1, 2); }
+      else { fill(rgb(255, 230, 120)); pixRect(round(e.x), round(e.y) - 7, 1, 1); }
+      blitC(fl ? sprJetW : sprJet, e.x, e.y);
+    } else {
+      boolean angry = e.hp < e.maxHp * 0.5;
+      if (angry && !fl) tint(255, 175, 175);
+      blitC(fl ? sprBossW : sprBoss[sin(e.age * 3) > 0 ? 1 : 0], e.x, e.y);
+      noTint();
+      blitC(sprCrown, e.x, e.y - 26);
+    }
+  }
+}
+
+void drawHuge() {
+  if (!hugeOn) return;
+  int sx = round(hugeX), sy = round(hugeY);
+  tint(hugeTint);
+  blitC(sprHuge[(int) (gTime * 2) % 2], sx, sy);
+  noTint();
+  fill(rgb(15, 15, 20));                     // very cool sunglasses
+  pixRect(sx - 27, sy - 23, 22, 9);
+  pixRect(sx + 5, sy - 23, 22, 9);
+  pixRect(sx - 5, sy - 21, 10, 2);
+  fill(rgb(150, 220, 255));
+  pixRect(sx - 24, sy - 21, 4, 2);
+  pixRect(sx + 8, sy - 21, 4, 2);
+}
+
+void drawHugeTongue() {
+  if (!hugeOn || hugeTongue <= 0) return;
+  float mx = hugeX, my = hugeY + 4;
+  float tx = lerp(mx, pX, hugeTongue), ty = lerp(my, P_Y - 2, hugeTongue);
+  int n = max(1, (int) (dist(mx, my, tx, ty) / 2));
+  fill(rgb(140, 25, 55));
+  for (int i = 0; i <= n; i++) pixRect(lerp(mx, tx, i / (float) n) - 2, lerp(my, ty, i / (float) n) - 2, 5, 5);
+  fill(rgb(240, 90, 130));
+  for (int i = 0; i <= n; i++) pixRect(lerp(mx, tx, i / (float) n) - 1, lerp(my, ty, i / (float) n) - 1, 3, 3);
+  fill(rgb(140, 25, 55));  pixRect(tx - 4, ty - 4, 9, 9);
+  fill(rgb(240, 90, 130)); pixRect(tx - 3, ty - 3, 7, 7);
+}
+
+void drawTongues() {
+  for (Enemy e : enemies) {                  // lightning frog lanes
+    if (e.dead || e.type != E_FROG || e.tier != 3 || e.state != 1) continue;
+    if ((frameCount / (e.timer < 0.5 ? 2 : 5)) % 2 == 0) {
+      fill(e.timer < 0.5 ? rgb(255, 250, 160) : rgb(200, 170, 40));
+      for (float y = e.y + 9; y < GH; y += 7) pixRect(round(e.x), y, 1, 4);
+    }
+  }
+  for (Enemy e : enemies) {
+    if (e.dead || e.type != E_BOSS) continue;
+    if (e.tongueWarn > 0 && (frameCount / (e.tongueWarn < 0.45 ? 2 : 4)) % 2 == 0) {     // warning line
+      fill(e.tongueWarn < 0.45 ? rgb(255, 230, 90) : rgb(255, 60, 60));   // turns yellow when it's locked on
+      for (float y = e.y + 10; y < GH; y += 6) pixRect(round(e.x), y, 1, 3);
+    }
+    if (e.tongueT > 0) {
+      float k = min(1, min((0.6 - e.tongueT) / 0.08, e.tongueT / 0.12));
+      float top = e.y + 4, len = (GH - top) * k;
+      fill(rgb(140, 25, 55));  pixRect(e.tongueX - 3, top, 7, len);
+      fill(rgb(240, 90, 130)); pixRect(e.tongueX - 2, top, 5, len);
+      fill(rgb(255, 160, 190)); pixRect(e.tongueX - 1, top, 1, len);
+      fill(rgb(140, 25, 55));  pixRect(e.tongueX - 5, top + len - 7, 11, 7);
+      fill(rgb(240, 90, 130)); pixRect(e.tongueX - 4, top + len - 6, 9, 5);
+    }
+  }
+}
+
+void drawEShots() {
+  for (EShot s : eshots) {
+    if (s.dead) continue;
+    blitC(s.kind == 0 ? sprPellet : s.kind == 1 ? sprSpit : sprSpitBig, s.x, s.y);
+  }
+}
+
+void drawPlayer() {
+  boolean blink = invuln > 0 && (frameCount / 4) % 2 == 0;
+  if (!blink) blitC(sprMan, pX, P_Y);
+  if (shieldT > 0 && (shieldT > 2 || (frameCount / 5) % 2 == 0)) {
+    fill(rgb(110, 220, 255), 210);
+    for (int[] o : ring) pixRect(round(pX) + o[0], round(P_Y) + o[1], 1, 1);
+  }
+}
+
+void drawTears() {
+  if (stormT > 0) tint(215, 165, 255);
+  for (Tear tr : tears) if (!tr.dead) blitC(sprTear[tr.sz], tr.x, tr.y);
+  noTint();
+}
+
+void drawParticles() {
+  for (Particle p : parts) {
+    fill(p.col, 255 * p.life / p.maxLife);
+    pixRect(p.x, p.y, p.sz, p.sz);
+  }
+}
+
+void drawBubbles() {
+  for (Enemy e : enemies) {
+    if (e.dead || e.sayLeft <= 0) continue;
+    if (e.type == E_BOSS) drawBubble(e.x, e.y + 24, BOSS_LINES, false);   // under the boss, clear of its health bar
+    else drawBubble(e.x, e.y - e.hh - 1, FROG_LINES, true);
+  }
+  if (hugeOn && hugeState == 1) drawBubble(hugeX, hugeY + 28, HUGE_HI, false);
+  if (hugeOn && hugeState == 3 && hugeT < 1.2) drawBubble(hugeX, hugeY + 28, HUGE_BYE, false);
+}
+
+// above = true: bubble sits above (ax, ay) with a tail. false: its top edge is at ay.
+void drawBubble(float ax, float ay, String[] lines, boolean above) {
+  int ps = max(1, PX - 1);
+  float tw = 0;
+  for (String l : lines) tw = max(tw, gTextW(l, ps));
+  float lineH = 9 * ps / (float) PX;
+  float bw = ceil(tw) + 6, bh = ceil(lines.length * lineH) + 3;
+  float bx = constrain(round(ax - bw / 2), PF_L + 2, PF_R - 2 - bw);
+  float by = above ? max(2, round(ay - bh - 4)) : round(ay);
+  fill(rgb(20, 20, 30));
+  pixRect(bx - 1, by, bw + 2, bh);
+  pixRect(bx, by - 1, bw, bh + 2);
+  fill(rgb(255, 255, 255));
+  pixRect(bx, by, bw, bh);
+  if (above && by + bh + 3 < ay + 2) {
+    float tx = constrain(round(ax), bx + 3, bx + bw - 4);
+    fill(rgb(20, 20, 30));
+    pixRect(tx - 1, by + bh, 3, 2);
+    pixRect(tx, by + bh + 2, 1, 2);
+    fill(rgb(255, 255, 255));
+    pixRect(tx, by + bh - 1, 1, 2);
+  }
+  for (int i = 0; i < lines.length; i++) gTextC(lines[i], bx + bw / 2, by + 2 + i * lineH, rgb(25, 25, 35), ps);
+}
+
+void drawPopups() {
+  int ps = max(1, PX - 1);
+  for (Popup p : popups) {
+    float w = gTextW(p.txt, ps);
+    float cx = constrain(p.x, PF_L + w / 2 + 2, PF_R - w / 2 - 2);
+    gTextSC(p.txt, cx, p.y, p.col, ps);
+  }
+}
+
+void drawBossBar() {
+  for (Enemy e : enemies) {
+    if (e.dead || e.type != E_BOSS) continue;
+    float w = PF_R - PF_L - 12;
+    fill(rgb(45, 20, 35));   pixRect(PF_L + 6, 4, w, 4);
+    fill(rgb(230, 60, 70));  pixRect(PF_L + 6, 4, w * max(0, e.hp / e.maxHp), 4);
+    fill(rgb(255, 150, 150)); pixRect(PF_L + 6, 4, w * max(0, e.hp / e.maxHp), 1);
+    gTextC("BIG FROG", PF_C, 10, rgb(255, 205, 205), max(1, PX - 1));
+  }
+}
+
+void pips(float x, float y, int lv, int mx, int col) {
+  int pw = (48 - (mx - 1)) / mx;
+  for (int i = 0; i < mx; i++) {
+    fill(i < lv ? col : rgb(45, 40, 85));
+    pixRect(x + i * (pw + 1), y, pw, 4);
+  }
+}
+
+void drawPanels() {
+  int lab = rgb(150, 140, 215), white = rgb(255, 255, 255);
+  int sm = max(1, PX - 1);
+  fill(rgb(18, 14, 44));
+  pixRect(0, 0, PF_L, GH);
+  pixRect(PF_R, 0, GW - PF_R, GH);
+  fill(rgb(75, 60, 150));
+  pixRect(PF_L - 1, 0, 1, GH);
+  pixRect(PF_R, 0, 1, GH);
+
+  // left: score, best, wave, lives
+  gText("SCORE", 6, 8, lab, PX);
+  gText(str(score), 6, 18, white, PX);
+  gText("BEST", 6, 34, lab, PX);
+  gText(str(best), 6, 44, newBest && (frameCount / 10) % 2 == 0 ? rgb(255, 220, 80) : white, PX);
+  gText("WAVE", 6, 60, lab, PX);
+  gText(str(max(1, wave)), 6, 70, white, PX);
+  gText("LIVES", 6, 86, lab, PX);
+  for (int i = 0; i < 5; i++) blitC(i < lives ? sprHeart : sprHeartOff, 9 + i * 9, 100);
+  gText("MPU", 6, 122, lab, PX);
+  if (demoMode) {
+    fill(rgb(255, 60, 60));
+    if ((frameCount / 25) % 2 == 0) pixRect(6, 133, 5, 5);
+    gText("OFF", 14, 132, rgb(255, 80, 80), PX);
+    gText("NOT", 6, 142, rgb(255, 80, 80), sm);
+    gText("CONNECTED", 6, 148, rgb(255, 80, 80), sm);
+  } else {
+    fill(rgb(90, 255, 140));
+    pixRect(6, 133, 5, 5);
+    gText("ON", 14, 132, rgb(120, 255, 160), PX);
+    gText("CONNECTED", 6, 145, rgb(120, 255, 160), sm);
+  }
+  gText("MOVE", 6, 160, lab, PX);
+  if (demoMode) gText("< > KEYS", 6, 170, rgb(255, 210, 90), PX);
+  else gText("TILT", 6, 170, rgb(120, 255, 160), PX);
+  gText("P  PAUSE", 6, 186, lab, sm);
+  gText("G  EXIT", 6, 194, lab, sm);
+  if (!demoMode) gText("C  RECENTER", 6, 202, lab, sm);
+
+  // right: upgrades and timed buffs
+  float rx = PF_R + 6;
+  gText("UPGRADES", rx, 8, lab, PX);
+  gText("FIRE", rx, 22, white, PX);
+  pips(rx, 31, lvFire, MAX_FIRE, pickupColor(PK_FIRE));
+  gText("SPREAD", rx, 42, white, PX);
+  pips(rx, 51, lvSpread, MAX_SPREAD, pickupColor(PK_SPREAD));
+  gText("DAMAGE", rx, 62, white, PX);
+  pips(rx, 71, lvDamage, MAX_DAMAGE, pickupColor(PK_DAMAGE));
+  if (overcharge > 0) gText("BOOST +" + overcharge * 8 + "%", rx, 82, rgb(255, 150, 60), sm);
+  float by = 100;
+  if (stormT > 0) {
+    gText("STORM", rx, by, pickupColor(PK_STORM), PX);
+    fill(rgb(45, 40, 85)); pixRect(rx, by + 9, 48, 3);
+    fill(pickupColor(PK_STORM)); pixRect(rx, by + 9, 48 * stormT / stormMax, 3);
+    by += 20;
+  }
+  if (shieldT > 0) {
+    gText("SHIELD", rx, by, pickupColor(PK_SHIELD), PX);
+    fill(rgb(45, 40, 85)); pixRect(rx, by + 9, 48, 3);
+    fill(pickupColor(PK_SHIELD)); pixRect(rx, by + 9, 48 * shieldT / shieldMax, 3);
+  }
+  gText("TEARS FIRE", rx, 184, lab, sm);
+  gText("BY THEMSELVES", rx, 194, lab, sm);
+}
+
+// ── "MPU NOT CONNECTED" warnings ─────────────────────────────────────
+String mpuProblem() {
+  return port == null ? "CAN'T OPEN " + COM_PORT : COM_PORT + " IS OPEN BUT NO DATA";
+}
+
+// red strip under Sad Man for the whole game while there is no sensor data
+void drawNoMpuStrip() {
+  boolean on = (frameCount / 25) % 2 == 0;
+  fill(on ? rgb(170, 20, 30) : rgb(120, 10, 20));
+  pixRect(PF_L, 204, PF_R - PF_L, 12);
+  fill(rgb(255, 90, 90));
+  pixRect(PF_L, 204, PF_R - PF_L, 1);
+  gTextC(port == null ? "MPU NOT CONNECTED" : "NO DATA FROM MPU", PF_C, 207, rgb(255, 255, 255), PX);
+}
+
+// big red box on the title screen explaining what's wrong
+void drawNoMpuBox() {
+  int sm = max(1, PX - 1);
+  float x = PF_L + 6, y = 154, w = PF_R - PF_L - 12, h = 42;
+  fill(rgb(255, 80, 80));  pixRect(x - 1, y - 1, w + 2, h + 2);
+  fill(rgb(60, 8, 16));    pixRect(x, y, w, h);
+  if ((frameCount / 25) % 2 == 0) { fill(rgb(255, 70, 70)); pixRect(x + 4, y + 4, 4, 4); pixRect(x + w - 8, y + 4, 4, 4); }
+  gTextC("MPU NOT CONNECTED!", PF_C, y + 3, rgb(255, 90, 90), PX);
+  gTextC(mpuProblem(), PF_C, y + 14, rgb(255, 255, 255), sm);
+  gTextC(port == null ? "CHECK COM_PORT AT THE TOP OF THE CODE" : "TILT THE SENSOR ONCE / CHECK THE ESP32", PF_C, y + 22, rgb(255, 200, 200), sm);
+  gTextC("PLAYING WITH ARROW KEYS FOR NOW", PF_C, y + 31, rgb(255, 220, 90), sm);
+}
+
+void dim() {
+  fill(0, 0, 0, 165);
+  pixRect(PF_L, 0, PF_R - PF_L, GH);
+}
+
+void drawTitle() {
+  int sm = max(1, PX - 1);
+  gTextSC("SAD MAN", PF_C, 18, rgb(120, 170, 255), PX * 2);
+  gTextSC("VS THE SPACE FROGS", PF_C, 42, rgb(130, 230, 95), PX);
+  if ((frameCount / 20) % 2 == 0) gTextSC("PRESS SPACE TO START", PF_C, 142, rgb(255, 220, 80), PX);
+  if (demoMode) {
+    drawNoMpuBox();
+  } else {
+    gTextC("MPU CONNECTED", PF_C, 158, rgb(120, 255, 160), sm);
+    gTextC("TILT THE SENSOR LEFT / RIGHT TO MOVE", PF_C, 168, rgb(150, 230, 255), sm);
+    gTextC("HOLD IT FLAT + PRESS C TO RECENTER", PF_C, 177, rgb(150, 230, 255), sm);
+  }
+  gTextC("G: BACK TO THE VISUALIZER", PF_C, 203, rgb(150, 140, 215), sm);
+}
+
+void drawGameOver() {
+  int sm = max(1, PX - 1);
+  dim();
+  gTextSC("GAME OVER", PF_C, 46, rgb(255, 80, 80), PX * 2);
+  gTextC("SAD MAN IS EVEN SADDER NOW", PF_C, 66, rgb(150, 190, 255), sm);
+  gTextC("SCORE " + score, PF_C, 84, rgb(255, 255, 255), PX);
+  gTextC("REACHED WAVE " + wave, PF_C, 96, rgb(150, 140, 215), PX);
+  if (newBest) { if ((frameCount / 10) % 2 == 0) gTextSC("NEW BEST!", PF_C, 112, rgb(255, 220, 80), PX); }
+  else gTextC("BEST " + best, PF_C, 112, rgb(150, 140, 215), PX);
+  if (overT > 1.0) {
+    if ((frameCount / 20) % 2 == 0) gTextSC("SPACE: PLAY AGAIN", PF_C, 144, rgb(255, 220, 80), PX);
+    gTextC("G: BACK TO THE VISUALIZER", PF_C, 160, rgb(150, 140, 215), sm);
+  }
+}
+
+void drawPause() {
+  dim();
+  gTextSC("PAUSED", PF_C, 90, rgb(255, 255, 255), PX * 2);
+  gTextC("P TO CARRY ON CRYING", PF_C, 116, rgb(150, 190, 255), max(1, PX - 1));
+}
+
+void drawWaveText() {
+  if (waveIntro > 0) {
+    if (bossWave) {
+      if ((frameCount / 8) % 2 == 0) gTextSC("WARNING!", PF_C, 72, rgb(255, 70, 70), PX * 2);
+      gTextSC("BIG FROG INCOMING!", PF_C, 96, rgb(255, 210, 90), PX);
+    } else {
+      gTextSC("WAVE " + wave, PF_C, 72, rgb(255, 255, 255), PX * 2);
+      gTextSC(waveHint(), PF_C, 96, rgb(150, 220, 255), max(1, PX - 1));
+    }
+  }
+  if (bannerT > 0) gTextSC(bannerText, PF_C, 46, rgb(255, 220, 80), PX * 2);
+}
+
+String waveHint() {
+  if (wave == 1) return "YOUR TEARS FIRE AUTOMATICALLY";
+  if (wave == 2) return "WATCH OUT FOR JETS";
+  if (wave == 3) return "BLUE FROGS SPIT";
+  if (wave == 4) return "LIGHTNING FROGS! WATCH THE LANES";
+  if (wave == 6) return "MORE FROGS. ANGRIER FROGS.";
+  if (wave == 7) return "RED FROGS DIVE AT YOU";
+  if (wave % 5 == 4) return "BIG FROG NEXT WAVE...";
+  return "THEY KEEP COMING";
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Retro pixel font (5x7) and text drawing
+// ════════════════════════════════════════════════════════════════════
+// each entry: the character, then 7 rows as 2-digit hex (5 bits per row)
+final String[] FONT = {
+  "00E11131519110E", "1040C040404040E", "20E11010204081F", "31F02040201110E",
+  "402060A121F0202", "51F101E0101110E", "60608101E11110E", "71F010204080808",
+  "80E11110E11110E", "90E11110F01020C", "A0E1111111F1111", "B1E11111E11111E",
+  "C0E11101010110E", "D1C12111111121C", "E1F10101E10101F", "F1F10101E101010",
+  "G0E11101711110F", "H1111111F111111", "I0E04040404040E", "J0702020202120C",
+  "K11121418141211", "L1010101010101F", "M111B1515111111", "N11111915131111",
+  "O0E11111111110E", "P1E11111E101010", "Q0E11111115120D", "R1E11111E141211",
+  "S0F10100E01011E", "T1F040404040404", "U1111111111110E", "V11111111110A04",
+  "W1111111515150A", "X11110A040A1111", "Y1111110A040404", "Z1F01020408101F",
+  "?0E110102040004", "!04040404040004", ".00000000000C0C", ",000000000C0408",
+  ":000C0C000C0C00", "'0C040800000000", "-0000001F000000", "+0004041F040400",
+  "/00010204081000", "%18190204081303", "<02040810080402", ">08040201020408",
+  "(02040808080402", ")08040202020408", "*0004150E150400", "=00001F001F0000",
+  "_0000000000001F"
+};
+HashMap<Character, int[]> fontMap = null;
+HashMap<String, PImage> glyphCache = new HashMap<String, PImage>();
+
+PImage glyph(char ch, int col, int ps) {
+  String k = ch + "|" + col + "|" + ps;
+  PImage gi = glyphCache.get(k);
+  if (gi != null) return gi;
+  if (fontMap == null) {
+    fontMap = new HashMap<Character, int[]>();
+    for (String f : FONT) {
+      int[] rows = new int[7];
+      for (int i = 0; i < 7; i++) rows[i] = unhex(f.substring(1 + 2 * i, 3 + 2 * i));
+      fontMap.put(f.charAt(0), rows);
+    }
+  }
+  int[] rows = fontMap.get(ch);
+  if (rows == null) rows = fontMap.get('?');
+  gi = createImage(5 * ps, 7 * ps, ARGB);
+  gi.loadPixels();
+  for (int r = 0; r < 7; r++) {
+    for (int c = 0; c < 5; c++) {
+      if (((rows[r] >> (4 - c)) & 1) == 0) continue;
+      for (int yy = 0; yy < ps; yy++) for (int xx = 0; xx < ps; xx++) gi.pixels[(r * ps + yy) * 5 * ps + c * ps + xx] = col;
+    }
+  }
+  gi.updatePixels();
+  glyphCache.put(k, gi);
+  return gi;
+}
+
+// x, y in game pixels; ps = screen pixels per font pixel
+void gText(String s, float lx, float ly, int col, int ps) {
+  s = s.toUpperCase();
+  int x = gox + round(lx * PX), y = goy + round(ly * PX);
+  for (int i = 0; i < s.length(); i++) {
+    char ch = s.charAt(i);
+    if (ch != ' ') image(glyph(ch, col, ps), x + i * 6 * ps, y);
+  }
+}
+
+float gTextW(String s, int ps) {
+  return (s.length() * 6 * ps - ps) / (float) PX;
+}
+
+void gTextC(String s, float cx, float ly, int col, int ps) {
+  gText(s, cx - gTextW(s, ps) / 2, ly, col, ps);
+}
+
+// centred, with a drop shadow
+void gTextSC(String s, float cx, float ly, int col, int ps) {
+  float x = cx - gTextW(s, ps) / 2, o = ps / (float) PX;
+  gText(s, x + o, ly + o, rgb(0, 0, 0), ps);
+  gText(s, x, ly, col, ps);
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Pixel art (drawn from text, one character per pixel)
+// ════════════════════════════════════════════════════════════════════
+final String[] SPR_MAN = {
+  ".oRRo.......oRRo.",
+  ".oRRo.......oRRo.",
+  ".oBBo..ooo..oBBo.",
+  ".oBBo.oBBBo.oBBo.",
+  ".oBBooBBBBBooBBo.",
+  ".oBBoBBBBBBBoBBo.",
+  ".oBBoBSKSKSBoBBo.",
+  ".oBBoSKSSSKSoBBo.",
+  ".oBBoSWWSWWSoBBo.",
+  ".oBBoSKKSKKSoBBo.",
+  ".oBBoSSSSSTSoBBo.",
+  ".oBBosSKKKSsoBBo.",
+  ".oBBooKSSSKooBBo.",
+  "cCBBBCosssoCBBBCc",
+  "cCCBBBBBBBBBBBCCc",
+  "cCCoBBBBBBBBBoCCc",
+  ".cCoBBBYYYBBBoCc.",
+  ".cCoBBBBBBBBBoCc.",
+  ".cc.oBBBoBBBo.cc.",
+  ".c..oBBo.oBBo..c.",
+  "....oRRo.oRRo....",
+  "....oooo.oooo...."
+};
+final String[] SPR_FROG_A = {
+  "..ooo.....ooo..",
+  ".oWWWo...oWWWo.",
+  ".oWKWoooooWKWo.",
+  ".oGGGGGGGGGGGo.",
+  "oGGgGGGGGGGgGGo",
+  "oGGGGGGGGGGGGGo",
+  "oKGGGGGGGGGGGKo",
+  "oGKKKKKKKKKKKGo",
+  ".oGLLLLLLLLLGo.",
+  ".oGGLLLLLLLGGo.",
+  "ogGo.ooooo.oGgo",
+  "ogo.........ogo",
+  "oo...........oo"
+};
+final String[] SPR_FROG_B = {
+  "..ooo.....ooo..",
+  ".oWWWo...oWWWo.",
+  ".oWKWoooooWKWo.",
+  ".oGGGGGGGGGGGo.",
+  "oGGgGGGGGGGgGGo",
+  "oGGGGGGGGGGGGGo",
+  "oKGGGGGGGGGGGKo",
+  "oGKKKKKKKKKKKGo",
+  ".oGLLLLLLLLLGo.",
+  ".oGGLLLLLLLGGo.",
+  ".ogGoooooooGgo.",
+  "..ooo.....ooo..",
+  "..............."
+};
+final String[] SPR_JET = {
+  "....oRo....",
+  ".oo.oJo.oo.",
+  ".oJooJooJo.",
+  "..ojjJjjo..",
+  "....oJo....",
+  "ooooJJJoooo",
+  "oRJJJJJJJRo",
+  ".oojJJJjoo.",
+  "...oJCJo...",
+  "...oJCJo...",
+  "....oJo....",
+  ".....N....."
+};
+final String[] SPR_CROWN = {
+  "y.....y.....y",
+  "yy...yYy...yy",
+  "yYy.yYYYy.yYy",
+  "yYYyYYRYYyYYy",
+  "yYYYYYYYYYYYy",
+  "yBYYRYYYRYYBy",
+  "yyyyyyyyyyyyy"
+};
+final String[][] SPR_TEAR = {
+  { ".t.", "tTt", "TWT", ".T." },
+  { ".tt.", "tTTt", "TWTT", "TTTT", ".TT." },
+  { "..t..", ".tTt.", "tTTTt", "TWTTT", "TWTTT", "TTTTT", ".TTT." },
+  { "...t...", "..tTt..", ".tTTTt.", "tTTTTTt", "TWWTTTT", "TWTTTTT", "TTTTTTT", ".TTTTT.", "..TTT.." }
+};
+final String[] SPR_PELLET = { "rRr", "RYR", "rRr" };
+final String[] SPR_SPIT = { ".gg.", "gGWg", "gGGg", ".gg." };
+final String[] SPR_SPIT_BIG = { "..g..", ".gGg.", "gGWGg", ".gGg.", "..g.." };
+final String[] SPR_HEART = { ".RR.RR.", "RWRRRRR", "RRRRRRR", ".RRRRR.", "..RRR..", "...R..." };
+
+PImage sprMan, sprManBig, sprJet, sprJetW, sprCrown, sprPellet, sprSpit, sprSpitBig;
+PImage sprHeart, sprHeartOff, sprPlanetA, sprPlanetB, sprBossW;
+PImage[] sprTear = new PImage[4], sprIcon = new PImage[6], sprBoss = new PImage[2];
+PImage[][] sprFrog = new PImage[4][2], sprFrogW = new PImage[4][2];
+PImage[] sprHuge = new PImage[2];
+ArrayList<int[]> ring = new ArrayList<int[]>();
+
+void buildArt() {
+  artPX = PX;
+  glyphCache.clear();
+  int[] manCols = { rgb(25, 28, 62), rgb(75, 110, 205), rgb(48, 72, 150), rgb(242, 202, 168), rgb(206, 156, 124),
+                    rgb(255, 255, 255), rgb(20, 20, 30), rgb(150, 100, 185), rgb(98, 62, 135), rgb(190, 48, 62),
+                    rgb(235, 190, 60), rgb(110, 190, 255) };
+  sprMan    = makeSprite(SPR_MAN, "oBbSsWKCcRYT", manCols, PX);
+  sprManBig = makeSprite(SPR_MAN, "oBbSsWKCcRYT", manCols, PX * 2);
+
+  int[][] frogPal = {
+    { rgb(25, 55, 25), rgb(95, 190, 70), rgb(55, 135, 45), rgb(205, 230, 125), rgb(250, 250, 245), rgb(20, 20, 25) },
+    { rgb(20, 35, 80), rgb(85, 150, 235), rgb(50, 95, 180), rgb(190, 215, 255), rgb(250, 250, 245), rgb(20, 20, 25) },
+    { rgb(70, 20, 15), rgb(235, 95, 70), rgb(165, 50, 40), rgb(255, 205, 150), rgb(250, 250, 245), rgb(20, 20, 25) },
+    { rgb(80, 60, 0), rgb(255, 215, 50), rgb(200, 140, 20), rgb(255, 250, 200), rgb(250, 250, 245), rgb(20, 20, 25) }
+  };
+  for (int t = 0; t < 4; t++) {
+    sprFrog[t][0] = makeSprite(SPR_FROG_A, "oGgLWK", frogPal[t], PX);
+    sprFrog[t][1] = makeSprite(SPR_FROG_B, "oGgLWK", frogPal[t], PX);
+    sprFrogW[t][0] = whiteOf(sprFrog[t][0]);
+    sprFrogW[t][1] = whiteOf(sprFrog[t][1]);
+  }
+  int[] bossPal = { rgb(20, 45, 20), rgb(70, 160, 60), rgb(40, 110, 40), rgb(215, 230, 140), rgb(250, 250, 245), rgb(20, 20, 25) };
+  sprBoss[0] = makeSprite(SPR_FROG_A, "oGgLWK", bossPal, PX * 3);
+  sprBoss[1] = makeSprite(SPR_FROG_B, "oGgLWK", bossPal, PX * 3);
+  sprBossW = whiteOf(sprBoss[0]);
+  int[] hugePal = { rgb(45, 45, 50), rgb(225, 225, 225), rgb(165, 165, 170), rgb(255, 255, 255), rgb(250, 250, 245), rgb(20, 20, 25) };
+  sprHuge[0] = makeSprite(SPR_FROG_A, "oGgLWK", hugePal, PX * 4);   // grey, tinted a random colour when drawn
+  sprHuge[1] = makeSprite(SPR_FROG_B, "oGgLWK", hugePal, PX * 4);
+  sprCrown = makeSprite(SPR_CROWN, "yYRB", new int[] { rgb(190, 135, 25), rgb(255, 205, 60), rgb(230, 50, 60), rgb(70, 150, 255) }, PX * 2);
+
+  sprJet  = makeSprite(SPR_JET, "oJjCRN", new int[] { rgb(30, 32, 44), rgb(185, 190, 205), rgb(120, 125, 145), rgb(100, 180, 255), rgb(230, 60, 50), rgb(80, 80, 95) }, PX);
+  sprJetW = whiteOf(sprJet);
+
+  for (int i = 0; i < 4; i++) sprTear[i] = makeSprite(SPR_TEAR[i], "tTW", new int[] { rgb(170, 225, 255), rgb(70, 150, 255), rgb(255, 255, 255) }, PX);
+  sprPellet  = makeSprite(SPR_PELLET, "rRY", new int[] { rgb(150, 30, 30), rgb(255, 70, 60), rgb(255, 230, 140) }, PX);
+  sprSpit    = makeSprite(SPR_SPIT, "gGW", new int[] { rgb(70, 180, 50), rgb(170, 255, 100), rgb(240, 255, 220) }, PX);
+  sprSpitBig = makeSprite(SPR_SPIT_BIG, "gGW", new int[] { rgb(70, 180, 50), rgb(170, 255, 100), rgb(240, 255, 220) }, PX);
+  sprHeart    = makeSprite(SPR_HEART, "RW", new int[] { rgb(255, 80, 110), rgb(255, 200, 210) }, PX);
+  sprHeartOff = makeSprite(SPR_HEART, "RW", new int[] { rgb(55, 45, 90), rgb(75, 65, 110) }, PX);
+
+  char[] iconCh = { 'F', 'S', 'D', '*', 'O', '+' };
+  for (int i = 0; i < 6; i++) sprIcon[i] = makeIcon(pickupColor(i), iconCh[i]);
+
+  sprPlanetA = makePlanet(20, rgb(225, 150, 95), rgb(170, 90, 70), true);
+  sprPlanetB = makePlanet(13, rgb(110, 200, 190), rgb(60, 120, 160), false);
+
+  ring.clear();
+  for (int a = 0; a < 360; a += 2) {
+    int dx = round(13 * cos(radians(a))), dy = round(15 * sin(radians(a)));
+    boolean have = false;
+    for (int[] o : ring) if (o[0] == dx && o[1] == dy) have = true;
+    if (!have) ring.add(new int[] { dx, dy });
+  }
+}
+
+PImage makeSprite(String[] rows, String keys, int[] cols, int s) {
+  int w = rows[0].length(), h = rows.length;
+  PImage img = createImage(w * s, h * s, ARGB);
+  img.loadPixels();
+  for (int r = 0; r < h; r++) {
+    for (int c = 0; c < w; c++) {
+      int k = keys.indexOf(rows[r].charAt(c));
+      int col = k < 0 ? 0 : cols[k];
+      for (int yy = 0; yy < s; yy++) for (int xx = 0; xx < s; xx++) img.pixels[(r * s + yy) * w * s + c * s + xx] = col;
+    }
+  }
+  img.updatePixels();
+  return img;
+}
+
+PImage whiteOf(PImage src) {
+  PImage img = src.copy();
+  img.loadPixels();
+  for (int i = 0; i < img.pixels.length; i++) if ((img.pixels[i] >>> 24) != 0) img.pixels[i] = 0xFFFFFFFF;
+  img.updatePixels();
+  return img;
+}
+
+void setPix(PImage img, int x, int y, int col, int s) {
+  for (int yy = 0; yy < s; yy++) for (int xx = 0; xx < s; xx++) img.pixels[(y * s + yy) * img.width + x * s + xx] = col;
+}
+
+// an 11x11 buff capsule with a letter on it
+PImage makeIcon(int base, char ch) {
+  int n = 11, s = PX;
+  PImage img = createImage(n * s, n * s, ARGB);
+  img.loadPixels();
+  int dark = lerpColor(base, rgb(0, 0, 0), 0.55), light = lerpColor(base, rgb(255, 255, 255), 0.45);
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      boolean corner = (x == 0 || x == n - 1) && (y == 0 || y == n - 1);
+      if (corner) continue;
+      boolean edge = x == 0 || y == 0 || x == n - 1 || y == n - 1;
+      setPix(img, x, y, edge ? dark : (y == 1 || x == 1) ? light : base, s);
+    }
+  }
+  if (fontMap == null) glyph('A', 0, 1);   // makes sure the font is loaded
+  int[] rows = fontMap.get(ch);
+  for (int r = 0; r < 7; r++) for (int c = 0; c < 5; c++) {
+    if (((rows[r] >> (4 - c)) & 1) == 0) continue;
+    setPix(img, 4 + c, 3 + r, dark, s);     // shadow
+    setPix(img, 3 + c, 2 + r, rgb(255, 255, 255), s);
+  }
+  img.updatePixels();
+  return img;
+}
+
+// a little shaded pixel planet
+PImage makePlanet(int r, int c1, int c2, boolean ringed) {
+  int pad = ringed ? 8 : 0;
+  int w = 2 * r + 1 + 2 * pad, h = 2 * r + 1, s = PX;
+  PImage img = createImage(w * s, h * s, ARGB);
+  img.loadPixels();
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      float dx = x - pad - r, dy = y - r;
+      if (dx * dx + dy * dy > r * r) continue;
+      float band = sin(dy * 0.55 + sin(dx * 0.18) * 1.3);
+      int col = band > 0.2 ? c1 : c2;
+      float lit = 0.55 - (dx * 0.55 + dy * 0.45) / r;
+      if (lit < 0.05 || (lit < 0.3 && (x + y) % 2 == 0)) col = lerpColor(col, rgb(10, 8, 30), 0.6);
+      setPix(img, x, y, col, s);
+    }
+  }
+  if (ringed) {
+    for (int x = 0; x < w; x++) {
+      float dx = x - pad - r;
+      float ry = r * 0.35 * sqrt(max(0, 1 - sq(dx / (r + pad))));
+      int y1 = round(r + ry * 0.4 + dx * 0.15);
+      if (y1 < 0 || y1 >= h) continue;
+      boolean behind = dx * dx + (y1 - r) * (y1 - r) <= r * r && y1 < r;
+      if (!behind) setPix(img, x, y1, rgb(240, 215, 160), s);
+    }
+  }
+  img.updatePixels();
+  return img;
 }
